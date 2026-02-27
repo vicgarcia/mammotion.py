@@ -7,7 +7,7 @@
 # ]
 # ///
 
-"""mowctl - mammotion mower control cli tool
+"""mammotion - mammotion mower control cli tool
 simple single-file cli for controlling mammotion robot mowers via cloud.
 """
 
@@ -17,6 +17,7 @@ import base64
 import logging
 import os
 import sys
+from enum import Enum
 from typing import Any
 
 from pymammotion import MammotionHTTP, CloudIOTGateway
@@ -45,74 +46,83 @@ def mqtt_exception_handler(loop, context):
     # let other exceptions through
     loop.default_exception_handler(context)
 
-# work mode constants
-class WorkMode:
-    MODE_NOT_ACTIVE = 0
-    MODE_ONLINE = 1
-    MODE_OFFLINE = 2
-    MODE_DISABLE = 8
-    MODE_INITIALIZATION = 10
-    MODE_READY = 11
-    MODE_WORKING = 13
-    MODE_RETURNING = 14
-    MODE_CHARGING = 15
-    MODE_UPDATING = 16
-    MODE_LOCK = 17
-    MODE_PAUSE = 19
-    MODE_MANUAL_MOWING = 20
-    MODE_UPDATE_SUCCESS = 22
-    MODE_OTA_UPGRADE_FAIL = 23
-    MODE_JOB_DRAW = 31
-    MODE_OBSTACLE_DRAW = 32
-    MODE_CHANNEL_DRAW = 34
-    MODE_ERASER_DRAW = 35
-    MODE_EDIT_BOUNDARY = 36
-    MODE_LOCATION_ERROR = 37
-    MODE_BOUNDARY_JUMP = 38
-    MODE_CHARGING_PAUSE = 39
 
-def device_mode_name(mode: int) -> str:
-    """convert work mode int to readable name."""
-    mode_names = {
-        0: "not active",
-        1: "online/idle",
-        2: "offline",
-        8: "disabled",
-        10: "initializing",
-        11: "ready",
-        13: "mowing",
-        14: "returning to dock",
-        15: "charging",
-        16: "updating firmware",
-        17: "locked",
-        19: "paused",
-        20: "manual mowing",
-        22: "update complete",
-        23: "update failed",
-        31: "drawing boundary",
-        32: "drawing obstacle",
-        34: "drawing channel",
-        35: "erasing",
-        36: "editing boundary",
-        37: "location error",
-        38: "boundary error",
-        39: "paused (charging)",
-    }
-    return mode_names.get(mode, f"unknown ({mode})")
+class MammotionWorkMode(Enum):
+    """work mode constants with display names."""
+    NOT_ACTIVE = (0, "not active")
+    ONLINE = (1, "online/idle")
+    OFFLINE = (2, "offline")
+    DISABLE = (8, "disabled")
+    INITIALIZATION = (10, "initializing")
+    READY = (11, "ready")
+    WORKING = (13, "mowing")
+    RETURNING = (14, "returning to dock")
+    CHARGING = (15, "charging")
+    UPDATING = (16, "updating firmware")
+    LOCK = (17, "locked")
+    PAUSE = (19, "paused")
+    MANUAL_MOWING = (20, "manual mowing")
+    UPDATE_SUCCESS = (22, "update complete")
+    OTA_UPGRADE_FAIL = (23, "update failed")
+    JOB_DRAW = (31, "drawing boundary")
+    OBSTACLE_DRAW = (32, "drawing obstacle")
+    CHANNEL_DRAW = (34, "drawing channel")
+    ERASER_DRAW = (35, "erasing")
+    EDIT_BOUNDARY = (36, "editing boundary")
+    LOCATION_ERROR = (37, "location error")
+    BOUNDARY_JUMP = (38, "boundary error")
+    CHARGING_PAUSE = (39, "paused (charging)")
+
+    def __new__(cls, value: int, display: str):
+        obj = object.__new__(cls)
+        obj._value_ = value
+        obj.display = display
+        return obj
+
+    @classmethod
+    def from_value(cls, value: int) -> "MammotionWorkMode | None":
+        """look up mode by int value, returns None if not found."""
+        for mode in cls:
+            if mode.value == value:
+                return mode
+        return None
+
+    @classmethod
+    def display_for(cls, value: int) -> str:
+        """get display name for an int value, with fallback for unknown values."""
+        mode = cls.from_value(value)
+        return mode.display if mode else f"unknown ({value})"
 
 
-def rtk_pos_level_name(level: int) -> str:
-    """convert RTK position level to readable name."""
-    levels = {
-        0: "no fix",
-        1: "single",
-        2: "float",
-        4: "fix",
-    }
-    return levels.get(level, f"unknown ({level})")
+class MammotionRtkLevel(Enum):
+    """RTK position/fix quality levels."""
+    NO_FIX = (0, "no fix")
+    SINGLE = (1, "single")
+    FLOAT = (2, "float")
+    FIX = (4, "fix")
+
+    def __new__(cls, value: int, display: str):
+        obj = object.__new__(cls)
+        obj._value_ = value
+        obj.display = display
+        return obj
+
+    @classmethod
+    def from_value(cls, value: int) -> "MammotionRtkLevel | None":
+        """look up level by int value, returns None if not found."""
+        for level in cls:
+            if level.value == value:
+                return level
+        return None
+
+    @classmethod
+    def display_for(cls, value: int) -> str:
+        """get display name for an int value, with fallback for unknown values."""
+        level = cls.from_value(value)
+        return level.display if level else f"unknown ({value})"
 
 
-class MowCtl:
+class MammotionClient:
     """controller for mammotion mower via cloud http api."""
 
     def __init__(self):
@@ -256,20 +266,20 @@ class MowCtl:
 
     def can_pause(self, status: int) -> bool:
         """check if device can be paused."""
-        return status == WorkMode.MODE_WORKING
+        return status == MammotionWorkMode.WORKING
 
     def can_resume(self, status: int) -> bool:
         """check if device can be resumed."""
-        return status in (WorkMode.MODE_PAUSE, WorkMode.MODE_CHARGING_PAUSE)
+        return status in (MammotionWorkMode.PAUSE, MammotionWorkMode.CHARGING_PAUSE)
 
     def can_cancel(self, status: int) -> bool:
         """check if there's an active task to cancel."""
-        return status in (WorkMode.MODE_WORKING, WorkMode.MODE_PAUSE,
-                         WorkMode.MODE_CHARGING_PAUSE, WorkMode.MODE_RETURNING)
+        return status in (MammotionWorkMode.WORKING, MammotionWorkMode.PAUSE,
+                         MammotionWorkMode.CHARGING_PAUSE, MammotionWorkMode.RETURNING)
 
     def can_dock(self, status: int) -> bool:
         """check if device can be sent to dock."""
-        return status in (WorkMode.MODE_READY, WorkMode.MODE_WORKING, WorkMode.MODE_PAUSE)
+        return status in (MammotionWorkMode.READY, MammotionWorkMode.WORKING, MammotionWorkMode.PAUSE)
 
     async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
         """get current device state via mqtt."""
@@ -338,7 +348,7 @@ class MowCtl:
 
             state = {
                 'status': device_obj.report_data.dev.sys_status,
-                'status_name': device_mode_name(device_obj.report_data.dev.sys_status),
+                'status_name': MammotionWorkMode.display_for(device_obj.report_data.dev.sys_status),
                 'battery': device_obj.report_data.dev.battery_val,
                 'progress': area_raw >> 16,  # upper 16 bits = progress %
                 'total_time_min': progress_raw & 65535,  # lower 16 bits = total time in minutes
@@ -464,7 +474,7 @@ class MowCtl:
         print(f"Battery: {state['battery']}%")
 
         # show progress if mowing or paused
-        if state['status'] in (WorkMode.MODE_WORKING, WorkMode.MODE_PAUSE, WorkMode.MODE_CHARGING_PAUSE):
+        if state['status'] in (MammotionWorkMode.WORKING, MammotionWorkMode.PAUSE, MammotionWorkMode.CHARGING_PAUSE):
             print(f"Progress: {state['progress']}%")
             if state['time_left_min'] > 0:
                 hours = state['time_left_min'] // 60
@@ -487,7 +497,7 @@ class MowCtl:
 
         # rtk/gps status
         if state['gps_stars'] > 0:
-            rtk_level = rtk_pos_level_name(state['rtk_pos_level'])
+            rtk_level = MammotionRtkLevel.display_for(state['rtk_pos_level'])
             print(f"RTK: {rtk_level} | GPS: {state['gps_stars']} satellites")
 
         # maintenance stats
@@ -1321,14 +1331,14 @@ def main():
         parser.print_help()
         return 1
 
-    # create controller and run
-    ctl = MowCtl()
+    # create client and run
+    client = MammotionClient()
 
-    # bind controller to func
+    # bind client to func
     if hasattr(args, 'func'):
-        args.func = args.func(ctl)
+        args.func = args.func(client)
 
-    return asyncio.run(ctl.run(args))
+    return asyncio.run(client.run(args))
 
 
 if __name__ == '__main__':
