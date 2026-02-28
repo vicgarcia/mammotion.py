@@ -7,16 +7,13 @@
 # ]
 # ///
 
-"""mammotion - mammotion mower control cli tool
-simple single-file cli for controlling mammotion robot mowers via cloud.
-"""
-
 import argparse
 import asyncio
 import base64
 import logging
 import os
 import sys
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -35,6 +32,13 @@ logger = logging.getLogger(__name__)
 # silence noisy mqtt/linkkit loggers (try multiple name variations)
 for logger_name in ["Paho", "paho", "paho.mqtt", "linkkit", "aliyunsdkiotx"]:
     logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+
+# conversion constants
+MM_PER_INCH = 25.4
+CM_PER_INCH = 2.54
+METERS_TO_MILES = 0.000621371
+SQFT_PER_SQM = 10.764
+
 
 # suppress mqtt cleanup errors
 def mqtt_exception_handler(loop, context):
@@ -142,6 +146,41 @@ class MammotionClient:
             return False
         return True
 
+    @staticmethod
+    def _get_attr(obj, *keys, default=''):
+        """get attribute from dict or object, trying multiple key names."""
+        for key in keys:
+            if isinstance(obj, dict):
+                if key in obj:
+                    return obj[key]
+            elif hasattr(obj, key):
+                return getattr(obj, key)
+        return default
+
+    def _create_mqtt_connection(self) -> MammotionCloud:
+        """create mqtt connection for device communication."""
+        return MammotionCloud(
+            AliyunMQTT(
+                region_id=self.cloud_gateway.region_response.data.regionId,
+                product_key=self.cloud_gateway.aep_response.data.productKey,
+                device_name=self.cloud_gateway.aep_response.data.deviceName,
+                device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
+                iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
+                client_id=self.cloud_gateway.client_id,
+                cloud_client=self.cloud_gateway
+            ),
+            cloud_client=self.cloud_gateway
+        )
+
+    def _find_cloud_device(self, device_name: str):
+        """find cloud device object by name from cloud gateway response."""
+        if not self.cloud_gateway or not self.cloud_gateway.devices_by_account_response:
+            return None
+        for dev in self.cloud_gateway.devices_by_account_response.data.data:
+            if dev.device_name == device_name:
+                return dev
+        return None
+
     async def login(self, email: str, password: str) -> bool:
         """login to mammotion cloud and setup http client."""
         try:
@@ -172,32 +211,23 @@ class MammotionClient:
             print(f"login failed: {e}")
             return False
 
-    async def get_devices(self) -> list[dict[str, Any]]:
-        """get list of devices from cloud."""
+    async def get_devices(self) -> list[dict[str, Any]] | None:
+        """get list of devices from cloud. returns None on failure."""
         if not self.http or not self.cloud_gateway:
-            return []
+            return None
 
         resp = await self.http.get_user_device_list()
         if not resp or resp.code != 0:
-            return []
+            return None
 
         devices = []
         for dev in resp.data:
-            # handle both dict and object responses
-            if isinstance(dev, dict):
-                dev_name = dev.get('device_name', dev.get('deviceName', ''))
-                iot_id = dev.get('iot_id', dev.get('iotId', ''))
-            else:
-                dev_name = getattr(dev, 'device_name', getattr(dev, 'deviceName', ''))
-                iot_id = getattr(dev, 'iot_id', getattr(dev, 'iotId', ''))
+            dev_name = self._get_attr(dev, 'device_name', 'deviceName')
+            iot_id = self._get_attr(dev, 'iot_id', 'iotId')
 
             # get product_key from cloud_gateway devices_by_account response
-            product_key = ''
-            if self.cloud_gateway and self.cloud_gateway.devices_by_account_response:
-                for cloud_dev in self.cloud_gateway.devices_by_account_response.data.data:
-                    if cloud_dev.iot_id == iot_id:
-                        product_key = cloud_dev.product_key
-                        break
+            cloud_dev = self._find_cloud_device(dev_name)
+            product_key = cloud_dev.product_key if cloud_dev else ''
 
             devices.append({
                 'device_name': dev_name,
@@ -242,11 +272,10 @@ class MammotionClient:
                 iot_id=device['iot_id']
             )
 
-            if resp.code == 0:
-                return True
-            else:
+            if resp.code != 0:
                 print(f"command failed: {resp.msg}")
                 return False
+            return True
 
         except Exception as e:
             logger.exception("send_command error")
@@ -266,25 +295,33 @@ class MammotionClient:
 
     def can_pause(self, status: int) -> bool:
         """check if device can be paused."""
-        return status == MammotionWorkMode.WORKING
+        return status == MammotionWorkMode.WORKING.value
 
     def can_resume(self, status: int) -> bool:
         """check if device can be resumed."""
-        return status in (MammotionWorkMode.PAUSE, MammotionWorkMode.CHARGING_PAUSE)
+        return status in (MammotionWorkMode.PAUSE.value, MammotionWorkMode.CHARGING_PAUSE.value)
 
     def can_cancel(self, status: int) -> bool:
         """check if there's an active task to cancel."""
-        return status in (MammotionWorkMode.WORKING, MammotionWorkMode.PAUSE,
-                         MammotionWorkMode.CHARGING_PAUSE, MammotionWorkMode.RETURNING)
+        return status in (
+            MammotionWorkMode.WORKING.value,
+            MammotionWorkMode.PAUSE.value,
+            MammotionWorkMode.CHARGING_PAUSE.value,
+            MammotionWorkMode.RETURNING.value,
+        )
 
     def can_dock(self, status: int) -> bool:
         """check if device can be sent to dock."""
-        return status in (MammotionWorkMode.READY, MammotionWorkMode.WORKING, MammotionWorkMode.PAUSE)
+        return status in (
+            MammotionWorkMode.READY.value,
+            MammotionWorkMode.WORKING.value,
+            MammotionWorkMode.PAUSE.value,
+        )
 
     async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
         """get current device state via mqtt."""
         # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.set_exception_handler(mqtt_exception_handler)
 
         device = self.find_device(device_name)
@@ -292,27 +329,8 @@ class MammotionClient:
             return None
 
         try:
-            # create mqtt connection
-            mqtt = MammotionCloud(
-                AliyunMQTT(
-                    region_id=self.cloud_gateway.region_response.data.regionId,
-                    product_key=self.cloud_gateway.aep_response.data.productKey,
-                    device_name=self.cloud_gateway.aep_response.data.deviceName,
-                    device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                    iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                    client_id=self.cloud_gateway.client_id,
-                    cloud_client=self.cloud_gateway
-                ),
-                cloud_client=self.cloud_gateway
-            )
-
-            # find cloud device
-            cloud_dev = None
-            for dev in self.cloud_gateway.devices_by_account_response.data.data:
-                if dev.device_name == device['device_name']:
-                    cloud_dev = dev
-                    break
-
+            mqtt = self._create_mqtt_connection()
+            cloud_dev = self._find_cloud_device(device['device_name'])
             if not cloud_dev:
                 return None
 
@@ -323,7 +341,6 @@ class MammotionClient:
                 state_manager=state_manager
             )
 
-            # connect and request state
             mqtt.connect_async()
             await asyncio.sleep(2)
 
@@ -378,38 +395,18 @@ class MammotionClient:
     async def get_area_list(self, device_name: str) -> list[Any]:
         """get list of areas from device via mqtt."""
         # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.set_exception_handler(mqtt_exception_handler)
 
         device = self.find_device(device_name)
         if not device:
             return []
 
-        # create mqtt connection
-        mqtt = MammotionCloud(
-            AliyunMQTT(
-                region_id=self.cloud_gateway.region_response.data.regionId,
-                product_key=self.cloud_gateway.aep_response.data.productKey,
-                device_name=self.cloud_gateway.aep_response.data.deviceName,
-                device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                client_id=self.cloud_gateway.client_id,
-                cloud_client=self.cloud_gateway
-            ),
-            cloud_client=self.cloud_gateway
-        )
-
-        # find cloud device object
-        cloud_dev = None
-        for dev in self.cloud_gateway.devices_by_account_response.data.data:
-            if dev.device_name == device['device_name']:
-                cloud_dev = dev
-                break
-
+        mqtt = self._create_mqtt_connection()
+        cloud_dev = self._find_cloud_device(device['device_name'])
         if not cloud_dev:
             return []
 
-        # create cloud device wrapper
         state_manager = MowerStateManager(MowingDevice())
         cloud_device = MammotionBaseCloudDevice(
             mqtt=mqtt,
@@ -417,7 +414,6 @@ class MammotionClient:
             state_manager=state_manager
         )
 
-        # connect mqtt and sync
         mqtt.connect_async()
         await asyncio.sleep(3)
         await cloud_device.queue_command("send_todev_ble_sync", sync_type=3)
@@ -444,7 +440,7 @@ class MammotionClient:
         return areas
     # === command handlers ===
 
-    async def cmd_devices(self, args):
+    async def cmd_devices(self, args) -> None:
         """list all devices."""
         devices = await self.get_devices()
         if not devices:
@@ -455,7 +451,7 @@ class MammotionClient:
         for dev in devices:
             print(f"  - {dev['device_name']}")
 
-    async def cmd_status(self, args):
+    async def cmd_status(self, args) -> None:
         """show device status."""
         # handle RTK devices differently
         if self.is_rtk_device(args.device):
@@ -474,7 +470,11 @@ class MammotionClient:
         print(f"Battery: {state['battery']}%")
 
         # show progress if mowing or paused
-        if state['status'] in (MammotionWorkMode.WORKING, MammotionWorkMode.PAUSE, MammotionWorkMode.CHARGING_PAUSE):
+        if state['status'] in (
+            MammotionWorkMode.WORKING.value,
+            MammotionWorkMode.PAUSE.value,
+            MammotionWorkMode.CHARGING_PAUSE.value,
+        ):
             print(f"Progress: {state['progress']}%")
             if state['time_left_min'] > 0:
                 hours = state['time_left_min'] // 60
@@ -492,7 +492,7 @@ class MammotionClient:
 
         # show blade height if relevant
         if state['blade_height'] > 0:
-            blade_height_in = state['blade_height'] / 25.4
+            blade_height_in = state['blade_height'] / MM_PER_INCH
             print(f"Blade height: {state['blade_height']}mm ({blade_height_in:.1f}in)")
 
         # rtk/gps status
@@ -505,10 +505,10 @@ class MammotionClient:
             hours = state['lifetime_hours'] // 3600
             print(f"Lifetime work time: {hours}h")
         if state['mileage'] > 0:
-            miles = state['mileage'] * 0.000621371  # meters to miles
+            miles = state['mileage'] * METERS_TO_MILES
             print(f"Total mileage: {miles:.1f} miles")
 
-    async def cmd_status_rtk(self, args):
+    async def cmd_status_rtk(self, args) -> None:
         """show RTK base station status."""
         # get device info from cloud gateway
         cloud_dev = None
@@ -529,13 +529,13 @@ class MammotionClient:
         if cloud_dev.product_model:
             print(f"Model: {cloud_dev.product_model}")
 
-    async def cmd_execute(self, args):
-        """execute mowing task with specified areas."""
+    async def cmd_start(self, args) -> None:
+        """start mowing task with specified areas."""
         if not self.check_not_rtk(args.device):
             return
 
         # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.set_exception_handler(mqtt_exception_handler)
 
         # validate inputs
@@ -567,8 +567,8 @@ class MammotionClient:
         border_mode = 0 if args.mow_order == 'perimeter-first' else 1
 
         # convert inches to millimeters/centimeters for api
-        blade_height_mm = int(args.cutting_height * 25.4)  # inches to mm
-        path_spacing_cm = int(args.path_spacing * 2.54)    # inches to cm
+        blade_height_mm = int(args.cutting_height * MM_PER_INCH)
+        path_spacing_cm = int(args.path_spacing * CM_PER_INCH)
 
         # get areas from device
         print("fetching areas...")
@@ -637,27 +637,8 @@ class MammotionClient:
             return
 
         try:
-            # create mqtt connection
-            mqtt = MammotionCloud(
-                AliyunMQTT(
-                    region_id=self.cloud_gateway.region_response.data.regionId,
-                    product_key=self.cloud_gateway.aep_response.data.productKey,
-                    device_name=self.cloud_gateway.aep_response.data.deviceName,
-                    device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                    iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                    client_id=self.cloud_gateway.client_id,
-                    cloud_client=self.cloud_gateway
-                ),
-                cloud_client=self.cloud_gateway
-            )
-
-            # find cloud device
-            cloud_dev = None
-            for dev in self.cloud_gateway.devices_by_account_response.data.data:
-                if dev.device_name == device['device_name']:
-                    cloud_dev = dev
-                    break
-
+            mqtt = self._create_mqtt_connection()
+            cloud_dev = self._find_cloud_device(device['device_name'])
             if not cloud_dev:
                 print(f"cloud device not found for {device['device_name']}")
                 return
@@ -669,7 +650,6 @@ class MammotionClient:
                 state_manager=state_manager
             )
 
-            # connect mqtt
             mqtt.connect_async()
             await asyncio.sleep(2)
 
@@ -690,10 +670,10 @@ class MammotionClient:
             # disconnect and suppress cleanup errors
             try:
                 mqtt.disconnect()
-            except:
+            except Exception:
                 pass
 
-    async def cmd_pause(self, args):
+    async def cmd_pause(self, args) -> None:
         """pause current job."""
         if not self.check_not_rtk(args.device):
             return
@@ -718,7 +698,7 @@ class MammotionClient:
         else:
             print("pause command failed")
 
-    async def cmd_resume(self, args):
+    async def cmd_resume(self, args) -> None:
         """resume paused job."""
         if not self.check_not_rtk(args.device):
             return
@@ -743,7 +723,7 @@ class MammotionClient:
         else:
             print("resume command failed")
 
-    async def cmd_return(self, args):
+    async def cmd_return(self, args) -> None:
         """return to dock."""
         if not self.check_not_rtk(args.device):
             return
@@ -767,7 +747,7 @@ class MammotionClient:
         else:
             print("return command failed")
 
-    async def cmd_cancel(self, args):
+    async def cmd_cancel(self, args) -> None:
         """cancel current job."""
         if not self.check_not_rtk(args.device):
             return
@@ -792,7 +772,7 @@ class MammotionClient:
         else:
             print("cancel command failed")
 
-    async def cmd_areas(self, args):
+    async def cmd_areas(self, args) -> None:
         """list all areas/zones (requires MQTT)."""
         if not self.check_not_rtk(args.device):
             return
@@ -806,32 +786,12 @@ class MammotionClient:
             return
 
         try:
-            # create mqtt connection
-            mqtt = MammotionCloud(
-                AliyunMQTT(
-                    region_id=self.cloud_gateway.region_response.data.regionId,
-                    product_key=self.cloud_gateway.aep_response.data.productKey,
-                    device_name=self.cloud_gateway.aep_response.data.deviceName,
-                    device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                    iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                    client_id=self.cloud_gateway.client_id,
-                    cloud_client=self.cloud_gateway
-                ),
-                cloud_client=self.cloud_gateway
-            )
-
-            # find the actual device object from cloud
-            cloud_dev = None
-            for dev in self.cloud_gateway.devices_by_account_response.data.data:
-                if dev.device_name == device['device_name']:
-                    cloud_dev = dev
-                    break
-
+            mqtt = self._create_mqtt_connection()
+            cloud_dev = self._find_cloud_device(device['device_name'])
             if not cloud_dev:
                 print(f"cloud device not found for {device['device_name']}")
                 return
 
-            # create cloud device wrapper
             state_manager = MowerStateManager(MowingDevice())
             cloud_device = MammotionBaseCloudDevice(
                 mqtt=mqtt,
@@ -839,10 +799,7 @@ class MammotionClient:
                 state_manager=state_manager
             )
 
-            # connect mqtt
             mqtt.connect_async()
-
-            # wait for mqtt connection
             await asyncio.sleep(3)
 
             # sync device state first
@@ -882,13 +839,13 @@ class MammotionClient:
             logger.exception("areas command error")
             print(f"failed to get areas: {e}")
 
-    async def cmd_schedules(self, args):
+    async def cmd_schedules(self, args) -> None:
         """list scheduled mowing tasks."""
         if not self.check_not_rtk(args.device):
             return
 
         # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.set_exception_handler(mqtt_exception_handler)
 
         device = self.find_device(args.device)
@@ -902,28 +859,9 @@ class MammotionClient:
             areas = await self.get_area_list(args.device)
             area_map = {area.hash: area.name for area in areas} if areas else {}
 
-            # create mqtt connection
             print("connecting to retrieve schedules...")
-            mqtt = MammotionCloud(
-                AliyunMQTT(
-                    region_id=self.cloud_gateway.region_response.data.regionId,
-                    product_key=self.cloud_gateway.aep_response.data.productKey,
-                    device_name=self.cloud_gateway.aep_response.data.deviceName,
-                    device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                    iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                    client_id=self.cloud_gateway.client_id,
-                    cloud_client=self.cloud_gateway
-                ),
-                cloud_client=self.cloud_gateway
-            )
-
-            # find cloud device
-            cloud_dev = None
-            for dev in self.cloud_gateway.devices_by_account_response.data.data:
-                if dev.device_name == device['device_name']:
-                    cloud_dev = dev
-                    break
-
+            mqtt = self._create_mqtt_connection()
+            cloud_dev = self._find_cloud_device(device['device_name'])
             if not cloud_dev:
                 print(f"cloud device not found for {device['device_name']}")
                 return
@@ -935,7 +873,6 @@ class MammotionClient:
                 state_manager=state_manager
             )
 
-            # connect mqtt
             mqtt.connect_async()
             await asyncio.sleep(2)
 
@@ -1012,7 +949,7 @@ class MammotionClient:
 
                     # mowing settings
                     if plan.knife_height > 0:
-                        height_in = plan.knife_height / 25.4
+                        height_in = plan.knife_height / MM_PER_INCH
                         print(f"  Blade:       {plan.knife_height}mm ({height_in:.1f}\")")
 
                     if plan.route_model >= 0:
@@ -1020,7 +957,7 @@ class MammotionClient:
                         print(f"  Pattern:     {pattern}")
 
                     if plan.route_spacing > 0:
-                        spacing_in = plan.route_spacing / 2.54
+                        spacing_in = plan.route_spacing / CM_PER_INCH
                         print(f"  Spacing:     {plan.route_spacing}cm ({spacing_in:.1f}\")")
 
                     if plan.speed > 0:
@@ -1041,15 +978,13 @@ class MammotionClient:
             logger.exception("schedules command error")
             print(f"failed to get schedules: {e}")
 
-    async def cmd_reports(self, args):
+    async def cmd_reports(self, args) -> None:
         """get mowing job history reports."""
         if not self.check_not_rtk(args.device):
             return
 
-        from datetime import datetime
-
         # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         loop.set_exception_handler(mqtt_exception_handler)
 
         device = self.find_device(args.device)
@@ -1082,28 +1017,8 @@ class MammotionClient:
                 logger.debug(f"error parsing work report: {e}")
 
         try:
-
-            # create mqtt connection
-            mqtt = MammotionCloud(
-                AliyunMQTT(
-                    region_id=self.cloud_gateway.region_response.data.regionId,
-                    product_key=self.cloud_gateway.aep_response.data.productKey,
-                    device_name=self.cloud_gateway.aep_response.data.deviceName,
-                    device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                    iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                    client_id=self.cloud_gateway.client_id,
-                    cloud_client=self.cloud_gateway
-                ),
-                cloud_client=self.cloud_gateway
-            )
-
-            # find cloud device
-            cloud_dev = None
-            for dev in self.cloud_gateway.devices_by_account_response.data.data:
-                if dev.device_name == device['device_name']:
-                    cloud_dev = dev
-                    break
-
+            mqtt = self._create_mqtt_connection()
+            cloud_dev = self._find_cloud_device(device['device_name'])
             if not cloud_dev:
                 print(f"cloud device not found for {device['device_name']}")
                 return
@@ -1118,7 +1033,6 @@ class MammotionClient:
             # add our custom callback to capture work reports
             state_manager.cloud_on_notification_callback.add_subscribers(capture_work_reports)
 
-            # connect mqtt
             mqtt.connect_async()
             await asyncio.sleep(2)
 
@@ -1175,12 +1089,12 @@ class MammotionClient:
 
                     # area
                     if report.work_ares > 0:
-                        sqft = report.work_ares * 10.764  # m² to ft²
+                        sqft = report.work_ares * SQFT_PER_SQM
                         print(f"  Area:        {report.work_ares:.1f} m² ({sqft:.0f} ft²)")
 
                     # blade height
                     if report.height_of_knife > 0:
-                        inches = report.height_of_knife / 25.4
+                        inches = report.height_of_knife / MM_PER_INCH
                         print(f"  Blade:       {report.height_of_knife}mm ({inches:.1f}\")")
 
                     # progress
@@ -1227,7 +1141,7 @@ class MammotionClient:
             logger.exception("reports command error")
             print(f"failed to get mow reports: {e}")
 
-    async def run(self, args):
+    async def run(self, args) -> int:
         """main run method."""
         try:
             # get credentials from env or args
@@ -1243,7 +1157,8 @@ class MammotionClient:
                 return 1
 
             # get devices
-            if not await self.get_devices():
+            devices = await self.get_devices()
+            if devices is None:
                 print("failed to get devices")
                 return 1
 
@@ -1274,18 +1189,18 @@ def main():
     status_parser.add_argument('--device', required=True, help='device name')
     status_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_status(args))
 
-    # execute command
-    execute_parser = subparsers.add_parser('execute', help='execute mowing task with specified areas')
-    execute_parser.add_argument('--device', required=True, help='device name')
-    execute_parser.add_argument('--areas', required=True, nargs='+', help='space-separated area names or hashes to mow')
-    execute_parser.add_argument('--pattern', type=str, default='zigzag', choices=['perimeter', 'zigzag', 'chessboard', 'adaptive'], help='mowing path pattern: perimeter=perimeter only, zigzag=single pass (default), chessboard=cross/chess pattern, adaptive=adaptive zigzag')
-    execute_parser.add_argument('--cutting-height', type=float, default=2.8, help='cutting height in inches (2.2-3.9in), default: 2.8in')
-    execute_parser.add_argument('--path-spacing', type=float, default=10.0, help='spacing between mowing paths in inches (7.9-13.8in), default: 10.0in')
-    execute_parser.add_argument('--perimeter-laps', type=int, default=2, help='number of border/perimeter laps (0-4), default: 2')
-    execute_parser.add_argument('--mow-order', type=str, default='grid-first', choices=['perimeter-first', 'grid-first'], help='mowing order: perimeter-first=border then zigzag, grid-first=zigzag then border (default)')
-    execute_parser.add_argument('--mowing-angle', type=int, default=0, help='mowing angle in degrees (0-359), controls direction of mowing lines, default: 0 (east/west)')
-    execute_parser.add_argument('--speed', type=float, default=0.5, help='mowing speed: 0.0 (slow) to 1.0 (fast), default: 0.5')
-    execute_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_execute(args))
+    # start command
+    start_parser = subparsers.add_parser('start', help='start mowing task with specified areas')
+    start_parser.add_argument('--device', required=True, help='device name')
+    start_parser.add_argument('--areas', required=True, nargs='+', help='space-separated area names or hashes to mow')
+    start_parser.add_argument('--pattern', type=str, default='zigzag', choices=['perimeter', 'zigzag', 'chessboard', 'adaptive'], help='mowing path pattern: perimeter=perimeter only, zigzag=single pass (default), chessboard=cross/chess pattern, adaptive=adaptive zigzag')
+    start_parser.add_argument('--cutting-height', type=float, default=2.8, help='cutting height in inches (2.2-3.9in), default: 2.8in')
+    start_parser.add_argument('--path-spacing', type=float, default=10.0, help='spacing between mowing paths in inches (7.9-13.8in), default: 10.0in')
+    start_parser.add_argument('--perimeter-laps', type=int, default=2, help='number of border/perimeter laps (0-4), default: 2')
+    start_parser.add_argument('--mow-order', type=str, default='grid-first', choices=['perimeter-first', 'grid-first'], help='mowing order: perimeter-first=border then zigzag, grid-first=zigzag then border (default)')
+    start_parser.add_argument('--mowing-angle', type=int, default=0, help='mowing angle in degrees (0-359), controls direction of mowing lines, default: 0 (east/west)')
+    start_parser.add_argument('--speed', type=float, default=0.5, help='mowing speed: 0.0 (slow) to 1.0 (fast), default: 0.5')
+    start_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_start(args))
 
     # pause command
     pause_parser = subparsers.add_parser('pause', help='pause current mowing job')
