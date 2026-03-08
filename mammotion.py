@@ -10,11 +10,14 @@
 import argparse
 import asyncio
 import base64
+import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from pymammotion import MammotionHTTP, CloudIOTGateway
@@ -24,6 +27,13 @@ from pymammotion.mqtt import AliyunMQTT
 from pymammotion.data.model.device import MowingDevice
 from pymammotion.data.mower_state_manager import MowerStateManager
 from pymammotion.data.model.generate_route_information import GenerateRouteInformation
+from pymammotion.aliyun.model.aep_response import AepResponse
+from pymammotion.aliyun.model.connect_response import ConnectResponse
+from pymammotion.aliyun.model.dev_by_account_response import ListingDevAccountResponse
+from pymammotion.aliyun.model.login_by_oauth_response import LoginByOAuthResponse
+from pymammotion.aliyun.model.regions_response import RegionResponse
+from pymammotion.aliyun.model.session_by_authcode_response import SessionByAuthCodeResponse
+from pymammotion.http.model.http import LoginResponseData, JWTTokenInfo
 
 # setup logging
 logging.basicConfig(level=logging.WARNING)
@@ -39,6 +49,10 @@ CM_PER_INCH = 2.54
 METERS_TO_MILES = 0.000621371
 SQFT_PER_SQM = 10.764
 
+# auth cache configuration
+AUTH_CACHE_DIR = Path.home() / '.mammotion'
+AUTH_CACHE_FILE = AUTH_CACHE_DIR / 'auth.json'
+TOKEN_REFRESH_BUFFER_SECONDS = 5 * 60  # refresh if expiring within 5 minutes
 
 # suppress mqtt cleanup errors
 def mqtt_exception_handler(loop, context):
@@ -181,8 +195,184 @@ class MammotionClient:
                 return dev
         return None
 
-    async def login(self, email: str, password: str) -> bool:
+    def _save_auth_cache(self) -> bool:
+        """save current auth state to cache file."""
+        if not self.http or not self.cloud_gateway:
+            return False
+
+        try:
+            AUTH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+            cache_data = {
+                'version': 1,
+                'cached_at': int(time.time()),
+                'http': {
+                    'login_info': self.http.login_info.to_dict() if self.http.login_info else None,
+                    'expires_in': self.http.expires_in,
+                    'jwt_info': self.http.jwt_info.to_dict() if self.http.jwt_info else None,
+                    'account': self.http.account,
+                },
+                'cloud_gateway': {
+                    'region_response': self.cloud_gateway.region_response.to_dict() if self.cloud_gateway.region_response else None,
+                    'connect_response': self.cloud_gateway.connect_response.to_dict() if self.cloud_gateway.connect_response else None,
+                    'login_by_oauth_response': self.cloud_gateway.login_by_oauth_response.to_dict() if self.cloud_gateway.login_by_oauth_response else None,
+                    'aep_response': self.cloud_gateway.aep_response.to_dict() if self.cloud_gateway.aep_response else None,
+                    'session_by_authcode_response': self.cloud_gateway.session_by_authcode_response.to_dict() if self.cloud_gateway.session_by_authcode_response else None,
+                    'devices_by_account_response': self.cloud_gateway.devices_by_account_response.to_dict() if self.cloud_gateway.devices_by_account_response else None,
+                    'iot_token_issued_at': self.cloud_gateway._iot_token_issued_at,
+                    'client_id': self.cloud_gateway._client_id,
+                    'device_sn': self.cloud_gateway._device_sn,
+                    'utdid': self.cloud_gateway._utdid,
+                },
+                'user_account': self.user_account,
+            }
+
+            AUTH_CACHE_FILE.write_text(json.dumps(cache_data, indent=2))
+            logger.debug("saved auth cache to %s", AUTH_CACHE_FILE)
+            return True
+
+        except Exception as e:
+            logger.warning("failed to save auth cache: %s", e)
+            return False
+
+    def _load_auth_cache(self) -> dict | None:
+        """load auth cache from file, returns None if invalid or missing."""
+        if not AUTH_CACHE_FILE.exists():
+            return None
+
+        try:
+            cache_data = json.loads(AUTH_CACHE_FILE.read_text())
+
+            # validate version
+            if cache_data.get('version') != 1:
+                logger.debug("auth cache version mismatch, ignoring")
+                return None
+
+            return cache_data
+
+        except Exception as e:
+            logger.warning("failed to load auth cache: %s", e)
+            return None
+
+    def _is_token_valid(self, cache_data: dict) -> tuple[bool, bool]:
+        """check if cached tokens are still valid.
+
+        returns (iot_token_valid, can_refresh) tuple.
+        """
+        now = int(time.time())
+
+        cg = cache_data.get('cloud_gateway', {})
+        session = cg.get('session_by_authcode_response', {})
+        session_data = session.get('data', {})
+        iot_token_issued_at = cg.get('iot_token_issued_at', 0)
+        iot_token_expire = session_data.get('iotTokenExpire', 0)
+        refresh_token_expire = session_data.get('refreshTokenExpire', 0)
+
+        # check if iot token is still valid (with buffer)
+        iot_token_expiry = iot_token_issued_at + iot_token_expire
+        iot_token_valid = iot_token_expiry > (now + TOKEN_REFRESH_BUFFER_SECONDS)
+
+        # check if refresh token is still valid
+        refresh_token_expiry = iot_token_issued_at + refresh_token_expire
+        can_refresh = refresh_token_expiry > now
+
+        logger.debug("token check: iot_valid=%s, can_refresh=%s, iot_expires_in=%ds, refresh_expires_in=%ds",
+                     iot_token_valid, can_refresh,
+                     iot_token_expiry - now,
+                     refresh_token_expiry - now)
+
+        return iot_token_valid, can_refresh
+
+    async def _restore_from_cache(self, cache_data: dict) -> bool:
+        """restore http and cloud_gateway state from cache data."""
+        try:
+            http_data = cache_data.get('http', {})
+            cg_data = cache_data.get('cloud_gateway', {})
+
+            # restore http client
+            self.http = MammotionHTTP()
+            if http_data.get('login_info'):
+                self.http.login_info = LoginResponseData.from_dict(http_data['login_info'])
+            self.http.expires_in = http_data.get('expires_in', 0)
+            if http_data.get('jwt_info'):
+                self.http.jwt_info = JWTTokenInfo.from_dict(http_data['jwt_info'])
+            self.http.account = http_data.get('account')
+            if self.http.login_info:
+                self.http._headers["Authorization"] = f"Bearer {self.http.login_info.access_token}"
+
+            # restore cloud gateway with all cached responses
+            self.cloud_gateway = CloudIOTGateway(
+                mammotion_http=self.http,
+                connect_response=ConnectResponse.from_dict(cg_data['connect_response']) if cg_data.get('connect_response') else None,
+                login_by_oauth_response=LoginByOAuthResponse.from_dict(cg_data['login_by_oauth_response']) if cg_data.get('login_by_oauth_response') else None,
+                aep_response=AepResponse.from_dict(cg_data['aep_response']) if cg_data.get('aep_response') else None,
+                session_by_authcode_response=SessionByAuthCodeResponse.from_dict(cg_data['session_by_authcode_response']) if cg_data.get('session_by_authcode_response') else None,
+                region_response=RegionResponse.from_dict(cg_data['region_response']) if cg_data.get('region_response') else None,
+                dev_by_account=ListingDevAccountResponse.from_dict(cg_data['devices_by_account_response']) if cg_data.get('devices_by_account_response') else None,
+            )
+
+            # restore hardware identifiers
+            if cg_data.get('client_id'):
+                self.cloud_gateway._client_id = cg_data['client_id']
+            if cg_data.get('device_sn'):
+                self.cloud_gateway._device_sn = cg_data['device_sn']
+            if cg_data.get('utdid'):
+                self.cloud_gateway._utdid = cg_data['utdid']
+            if cg_data.get('iot_token_issued_at'):
+                self.cloud_gateway._iot_token_issued_at = cg_data['iot_token_issued_at']
+
+            # restore user account
+            self.user_account = cache_data.get('user_account', 0)
+
+            return True
+
+        except Exception as e:
+            logger.warning("failed to restore from cache: %s", e)
+            return False
+
+    async def _try_cached_login(self) -> bool:
+        """attempt to login using cached tokens. returns True on success."""
+        cache_data = self._load_auth_cache()
+        if not cache_data:
+            logger.debug("no auth cache found")
+            return False
+
+        iot_valid, can_refresh = self._is_token_valid(cache_data)
+
+        if not iot_valid and not can_refresh:
+            logger.debug("cached tokens expired and cannot refresh")
+            return False
+
+        # restore state from cache
+        if not await self._restore_from_cache(cache_data):
+            return False
+
+        # if iot token expired but can refresh, do so
+        if not iot_valid and can_refresh:
+            logger.debug("iot token expired, refreshing...")
+            try:
+                await self.cloud_gateway.check_or_refresh_session()
+                # update issued timestamp
+                self.cloud_gateway._iot_token_issued_at = int(time.time())
+                # save refreshed tokens
+                self._save_auth_cache()
+                print("(refreshed cached session)")
+            except Exception as e:
+                logger.warning("token refresh failed: %s", e)
+                return False
+        else:
+            print("(using cached session)")
+
+        return True
+
+    async def login(self, email: str, password: str, use_cache: bool = True) -> bool:
         """login to mammotion cloud and setup http client."""
+        # try cached login first
+        if use_cache:
+            if await self._try_cached_login():
+                return True
+            logger.debug("cached login failed, doing fresh login")
+
         try:
             self.http = MammotionHTTP()
 
@@ -203,6 +393,9 @@ class MammotionClient:
             await self.cloud_gateway.aep_handle()
             await self.cloud_gateway.session_by_auth_code()
             await self.cloud_gateway.list_binding_by_account()
+
+            # save auth cache for next time
+            self._save_auth_cache()
 
             return True
 
@@ -1152,8 +1345,9 @@ class MammotionClient:
                 print("error: email and password required (via args or MOWCTL_EMAIL/MOWCTL_PASSWORD env vars)")
                 return 1
 
-            # login
-            if not await self.login(email, password):
+            # login (use cache unless --no-cache specified)
+            use_cache = not getattr(args, 'no_cache', False)
+            if not await self.login(email, password, use_cache=use_cache):
                 return 1
 
             # get devices
@@ -1177,6 +1371,7 @@ def main():
     parser = argparse.ArgumentParser(description='mammotion mower control cli')
     parser.add_argument('-e', '--email', help='account email (or set MOWCTL_EMAIL)')
     parser.add_argument('-p', '--password', help='account password (or set MOWCTL_PASSWORD)')
+    parser.add_argument('--no-cache', action='store_true', help='skip cached auth, force fresh login')
 
     subparsers = parser.add_subparsers(dest='command', help='commands')
 
