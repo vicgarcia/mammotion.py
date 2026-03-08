@@ -299,6 +299,12 @@ class MammotionClient:
             self.http.account = http_data.get('account')
             if self.http.login_info:
                 self.http._headers["Authorization"] = f"Bearer {self.http.login_info.access_token}"
+                # The library expects response.data to contain userInformation
+                # Create a simple wrapper so mqtt.cloud_client.mammotion_http.response.data works
+                class ResponseWrapper:
+                    def __init__(self, data):
+                        self.data = data
+                self.http.response = ResponseWrapper(self.http.login_info)
 
             # restore cloud gateway with all cached responses
             self.cloud_gateway = CloudIOTGateway(
@@ -356,12 +362,12 @@ class MammotionClient:
                 self.cloud_gateway._iot_token_issued_at = int(time.time())
                 # save refreshed tokens
                 self._save_auth_cache()
-                print("(refreshed cached session)")
+                print("refreshed cached session...")
             except Exception as e:
                 logger.warning("token refresh failed: %s", e)
                 return False
         else:
-            print("(using cached session)")
+            print("using cached session...")
 
         return True
 
@@ -636,13 +642,17 @@ class MammotionClient:
     async def cmd_devices(self, args) -> None:
         """list all devices."""
         devices = await self.get_devices()
-        if not devices:
-            print("no devices found")
-            return
 
-        print(f"found {len(devices)} device(s):")
-        for dev in devices:
-            print(f"  - {dev['device_name']}")
+        print("\nDevices:")
+        print("=" * 70)
+
+        if not devices:
+            print("\nNo devices found.")
+        else:
+            for dev in devices:
+                print(f"  {dev['device_name']}")
+            print(f"\n{'=' * 70}")
+            print(f"Total: {len(devices)} device(s)")
 
     async def cmd_status(self, args) -> None:
         """show device status."""
@@ -658,9 +668,10 @@ class MammotionClient:
             print("failed to get device status")
             return
 
-        print(f"\nDevice: {args.device}")
-        print(f"Status: {state['status_name']}")
-        print(f"Battery: {state['battery']}%")
+        print(f"\nStatus for {args.device}:")
+        print("=" * 70)
+        print(f"  Status: {state['status_name']}")
+        print(f"  Battery: {state['battery']}%")
 
         # show progress if mowing or paused
         if state['status'] in (
@@ -668,11 +679,11 @@ class MammotionClient:
             MammotionWorkMode.PAUSE.value,
             MammotionWorkMode.CHARGING_PAUSE.value,
         ):
-            print(f"Progress: {state['progress']}%")
+            print(f"  Progress: {state['progress']}%")
             if state['time_left_min'] > 0:
                 hours = state['time_left_min'] // 60
                 mins = state['time_left_min'] % 60
-                print(f"Time remaining: {hours}h {mins}m")
+                print(f"  Time remaining: {hours}h {mins}m")
 
         # show position if available
         if state['pos_x'] != 0 or state['pos_y'] != 0:
@@ -681,25 +692,27 @@ class MammotionClient:
             y_m = state['pos_y'] / 1000
             heading_deg = (state['heading'] / 100) % 360
 
-            print(f"Position: ({x_m:.1f}m, {y_m:.1f}m) heading {heading_deg:.0f}°")
+            print(f"  Position: ({x_m:.1f}m, {y_m:.1f}m) heading {heading_deg:.0f}°")
 
         # show blade height if relevant
         if state['blade_height'] > 0:
             blade_height_in = state['blade_height'] / MM_PER_INCH
-            print(f"Blade height: {state['blade_height']}mm ({blade_height_in:.1f}in)")
+            print(f"  Blade height: {state['blade_height']}mm ({blade_height_in:.1f}in)")
 
         # rtk/gps status
         if state['gps_stars'] > 0:
             rtk_level = MammotionRtkLevel.display_for(state['rtk_pos_level'])
-            print(f"RTK: {rtk_level} | GPS: {state['gps_stars']} satellites")
+            print(f"  RTK: {rtk_level} | GPS: {state['gps_stars']} satellites")
 
         # maintenance stats
         if state['lifetime_hours'] > 0:
             hours = state['lifetime_hours'] // 3600
-            print(f"Lifetime work time: {hours}h")
+            print(f"  Lifetime work time: {hours}h")
         if state['mileage'] > 0:
             miles = state['mileage'] * METERS_TO_MILES
-            print(f"Total mileage: {miles:.1f} miles")
+            print(f"  Total mileage: {miles:.1f} miles")
+
+        print("=" * 70)
 
     async def cmd_status_rtk(self, args) -> None:
         """show RTK base station status."""
@@ -714,13 +727,15 @@ class MammotionClient:
             print(f"device not found: {args.device}")
             return
 
-        print(f"\nDevice: {args.device}")
-        print(f"Type: RTK Base Station")
-        print(f"Status: {'online' if cloud_dev.status == 1 else 'offline'}")
+        print(f"\nStatus for {args.device}:")
+        print("=" * 70)
+        print(f"  Type: RTK Base Station")
+        print(f"  Status: {'online' if cloud_dev.status == 1 else 'offline'}")
         if cloud_dev.product_name:
-            print(f"Product: {cloud_dev.product_name}")
+            print(f"  Product: {cloud_dev.product_name}")
         if cloud_dev.product_model:
-            print(f"Model: {cloud_dev.product_model}")
+            print(f"  Model: {cloud_dev.product_model}")
+        print("=" * 70)
 
     async def cmd_start(self, args) -> None:
         """start mowing task with specified areas."""
@@ -1018,12 +1033,17 @@ class MammotionClient:
             # get areas from state manager
             device_obj = state_manager.get_device()
 
+            print(f"\nAreas for {args.device}:")
+            print("=" * 70)
+
             if device_obj.map.area_name:
-                print(f"found {len(device_obj.map.area_name)} area(s):")
                 for area in device_obj.map.area_name:
-                    print(f"  - {area.name} (hash: {area.hash})")
+                    print(f"  {area.name} (hash: {area.hash})")
+                print(f"\n{'=' * 70}")
+                print(f"Total: {len(device_obj.map.area_name)} area(s)")
             else:
-                print("no areas found - try running again or check if map exists")
+                print("\nNo areas found.")
+                print("Try running again or check if map exists in the app.")
 
             # disconnect
             mqtt.disconnect()
