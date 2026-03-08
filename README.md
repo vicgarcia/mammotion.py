@@ -1,18 +1,15 @@
 # mammotion.py - Mammotion Mower Control CLI
 
-A powerful, single-file CLI tool for controlling your Mammotion robot mower (Luba, Luba 2, Yuka) via the cloud.
-
-Built with love using the [PyMammotion](https://github.com/mikey0000/PyMammotion) library.
+A python CLI tool for controlling your Mammotion robotic automower built using the [PyMammotion](https://github.com/mikey0000/PyMammotion) library
 
 ## Features
 
 - **Single-file executable** - Uses `uv run --script` with inline dependencies (PEP 723)
-- **Cloud control** - Connect to your mower from anywhere via Mammotion cloud HTTP API
-- **HTTP-only architecture** - No persistent MQTT connections, all commands via HTTP RPC
-- **Comprehensive commands** - Start, pause, return to dock, cancel jobs, leave dock
-- **Device discovery** - List all your Mammotion devices
-- **Environment variables** - Set credentials via `MOWCTL_EMAIL` and `MOWCTL_PASSWORD`
-- **Simple architecture** - Modeled after the LIFX CLI pattern
+- **Cloud control** - Connect to your mower from anywhere via Mammotion cloud API
+- **Start mowing tasks** - Specify areas, patterns, cutting height, speed, and more
+- **Device management** - List devices, check status, view areas and schedules
+- **RTK support** - Shows RTK base station status
+- **Environment variables** - Set credentials via `MAMMOTION_EMAIL` and `MAMMOTION_PASSWORD`
 
 ## Prerequisites
 
@@ -22,84 +19,100 @@ Built with love using the [PyMammotion](https://github.com/mikey0000/PyMammotion
 
 ## Installation
 
-### Install uv (if you haven't already)
-
 ```bash
+# Install uv (if needed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-```
 
-### Clone and run
-
-```bash
+# Clone and run
+git clone <repo>
 cd mammotion.py
 chmod +x mammotion.py
 
-# Run directly with uv - it will auto-install dependencies!
+# Run directly - uv auto-installs dependencies
 ./mammotion.py --help
 ```
 
-That's it! No need to create a virtualenv or install dependencies manually. `uv` handles everything!
-
 ## Usage
 
-### List your devices
-
+Set credentials via environment variables:
 ```bash
-./mammotion.py devices --email you@example.com --password yourpass
+export MAMMOTION_EMAIL="you@example.com"
+export MAMMOTION_PASSWORD="yourpass"
 ```
 
-### Start mowing
+Or pass them as arguments: `-e you@example.com -p yourpass`
 
+### List devices
 ```bash
-./mammotion.py start --device "Luba-ABC123" -e you@example.com -p yourpass
+./mammotion.py devices
 ```
 
-### Pause mowing
-
+### Check status
 ```bash
-./mammotion.py pause --device "Luba-ABC123" -e you@example.com -p yourpass
+./mammotion.py status --device Luba-ABC123
 ```
 
-### Return to dock
-
+### Start mowing task
 ```bash
-./mammotion.py return --device "Luba-ABC123" -e you@example.com -p yourpass
+# Mow specific areas with defaults
+./mammotion.py start --device Luba-ABC123 --areas front-yard back-yard
+
+# With custom settings
+./mammotion.py start --device Luba-ABC123 --areas front-yard \
+  --cutting-height 2.5 \
+  --speed 0.7 \
+  --perimeter-laps 2 \
+  --mow-order perimeter-first \
+  --pattern zigzag
 ```
 
-## Available Commands
+### Control commands
+```bash
+./mammotion.py pause --device Luba-ABC123
+./mammotion.py resume --device Luba-ABC123
+./mammotion.py return --device Luba-ABC123
+./mammotion.py cancel --device Luba-ABC123
+```
+
+### View areas and schedules
+```bash
+./mammotion.py areas --device Luba-ABC123
+./mammotion.py schedules --device Luba-ABC123
+./mammotion.py reports --device Luba-ABC123
+```
+
+## Commands
 
 | Command | Description |
 |---------|-------------|
 | `devices` | List all devices on your account |
-| `start --device "name"` | Start a mowing job |
-| `pause --device "name"` | Pause the current mowing job |
-| `return --device "name"` | Return to charging dock |
-| `leave-dock --device "name"` | Leave the charging dock |
-| `cancel --device "name"` | Cancel the current job |
+| `status` | Show device status (battery, position, RTK, etc.) |
+| `start` | Start a mowing task with specified areas |
+| `pause` | Pause current mowing job |
+| `resume` | Resume paused job |
+| `return` | Return to charging dock |
+| `cancel` | Cancel current job |
+| `areas` | List all mowing areas/zones |
+| `schedules` | List scheduled mowing tasks |
+| `reports` | Show mowing job history |
 
-## How It Works
+## Start Command Options
 
-1. **Authentication**: Logs into Mammotion cloud using OAuth2
-2. **Device Discovery**: Retrieves your device list from the cloud
-3. **Cloud Gateway**: Establishes connection through Aliyun IoT Gateway
-4. **Command Encoding**: Creates protobuf commands and encodes as base64
-5. **HTTP RPC**: Sends commands via `mqtt_invoke` HTTP endpoint (no persistent MQTT!)
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--areas` | required | Space-separated area names to mow |
+| `--cutting-height` | 2.8 | Cutting height in inches (2.2-3.9) |
+| `--speed` | 0.5 | Mowing speed: 0.0 (slow) to 1.0 (fast) |
+| `--perimeter-laps` | 2 | Number of border laps (0-4) |
+| `--mow-order` | grid-first | `grid-first` or `perimeter-first` |
+| `--pattern` | zigzag | `zigzag`, `chessboard`, `perimeter`, or `adaptive` |
+| `--path-spacing` | 10.0 | Path spacing in inches (7.9-13.8) |
+| `--mowing-angle` | 0 | Mowing angle in degrees (0-359) |
 
-## Architecture
+## RTK Base Stations
 
-This tool follows the LIFX CLI single-file pattern:
+RTK base stations are detected automatically. The `status` command shows:
+- Online/offline status
+- Product info
 
-- Single executable with inline PEP 723 dependencies
-- Class-based controller managing all operations
-- Async/await throughout for efficient I/O
-- HTTP-only architecture using `mqtt_invoke` RPC endpoint
-- No persistent MQTT connections = simpler, more reliable
-
-## Credits
-
-- [PyMammotion](https://github.com/mikey0000/PyMammotion) by mikey0000
-- [uv](https://github.com/astral-sh/uv) by Astral
-
-## License
-
-MIT License
+Other commands return "RTK does not support this command".
