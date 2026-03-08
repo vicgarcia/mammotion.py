@@ -1338,11 +1338,11 @@ class MammotionClient:
         """main run method."""
         try:
             # get credentials from env or args
-            email = args.email or os.environ.get('MOWCTL_EMAIL')
-            password = args.password or os.environ.get('MOWCTL_PASSWORD')
+            email = args.email or os.environ.get('MAMMOTION_EMAIL')
+            password = args.password or os.environ.get('MAMMOTION_PASSWORD')
 
             if not email or not password:
-                print("error: email and password required (via args or MOWCTL_EMAIL/MOWCTL_PASSWORD env vars)")
+                print("error: email and password required (via args or MAMMOTION_EMAIL/MAMMOTION_PASSWORD env vars)")
                 return 1
 
             # login (use cache unless --no-cache specified)
@@ -1369,8 +1369,8 @@ class MammotionClient:
 
 def main():
     parser = argparse.ArgumentParser(description='mammotion mower control cli')
-    parser.add_argument('-e', '--email', help='account email (or set MOWCTL_EMAIL)')
-    parser.add_argument('-p', '--password', help='account password (or set MOWCTL_PASSWORD)')
+    parser.add_argument('-e', '--email', help='account email (or set MAMMOTION_EMAIL)')
+    parser.add_argument('-p', '--password', help='account password (or set MAMMOTION_PASSWORD)')
     parser.add_argument('--no-cache', action='store_true', help='skip cached auth, force fresh login')
 
     subparsers = parser.add_subparsers(dest='command', help='commands')
