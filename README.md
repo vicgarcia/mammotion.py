@@ -33,6 +33,21 @@ cp mammotion.py ~/.local/bin
 chmod +x ~/.local/bin/mammotion.py
 ```
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `devices` | List all devices on your account |
+| `status` | Show device status (battery, position, RTK, etc.) |
+| `start` | Start a mowing task with specified areas |
+| `pause` | Pause current mowing job |
+| `resume` | Resume paused job |
+| `return` | Return to charging dock |
+| `cancel` | Cancel current job |
+| `areas` | List all mowing areas/zones |
+| `schedules` | List scheduled mowing tasks |
+| `reports` | Show mowing job history |
+
 ## Usage
 
 Set credentials via environment variables:
@@ -81,21 +96,6 @@ Or pass them as arguments: `-e you@example.com -p yourpass`
 ./mammotion.py schedules --device Luba-ABC123
 ./mammotion.py reports --device Luba-ABC123
 ```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `devices` | List all devices on your account |
-| `status` | Show device status (battery, position, RTK, etc.) |
-| `start` | Start a mowing task with specified areas |
-| `pause` | Pause current mowing job |
-| `resume` | Resume paused job |
-| `return` | Return to charging dock |
-| `cancel` | Cancel current job |
-| `areas` | List all mowing areas/zones |
-| `schedules` | List scheduled mowing tasks |
-| `reports` | Show mowing job history |
 
 ## Start Command Options
 
