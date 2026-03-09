@@ -116,3 +116,35 @@ RTK base stations are detected automatically. The `status` command shows:
 - Product info
 
 Other commands return "RTK does not support this command".
+
+## Agent Skill
+
+This project includes a `SKILL.md` file for use with AI coding agents (Claude Code, etc.). The skill enables natural language control of your mower.
+
+### Installation
+
+```bash
+# Create skills directory
+mkdir -p /path/to/agent/skills
+
+# Copy SKILL.md
+cp /path/to/mammotion.py/SKILL.md /path/to/agent/skills/mammotion.py/SKILL.md
+
+# Ensure mammotion.py is executable and in PATH
+chmod +x ~/.local/bin/mammotion.py
+
+# Set credentials (in bashrc, zshrc, ...)
+export MAMMOTION_EMAIL="you@example.com"
+export MAMMOTION_PASSWORD="yourpass"
+```
+
+### Usage with Claude Code
+
+Add the skills directory to your agent configuration, then interact naturally:
+
+> "Check the status of my mower"
+> "Start mowing the front yard with a chessboard pattern"
+> "Pause the mower and send it back to the dock"
+> "Show me the mowing history for the last week"
+
+The agent reads `SKILL.md` to understand available commands, parameters, and how to interpret responses.
