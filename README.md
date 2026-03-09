@@ -1,4 +1,4 @@
-# mammotion.py - Mammotion Mower Control CLI
+# mammotion.py
 
 A python CLI tool for controlling your Mammotion robotic automower built using the [PyMammotion](https://github.com/mikey0000/PyMammotion) library
 
@@ -20,16 +20,17 @@ A python CLI tool for controlling your Mammotion robotic automower built using t
 ## Installation
 
 ```bash
-# Install uv (if needed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone and run
+# Clone and make executable
 git clone <repo>
 cd mammotion.py
 chmod +x mammotion.py
 
-# Run directly - uv auto-installs dependencies
+# Run
 ./mammotion.py --help
+
+# Install
+cp mammotion.py ~/.local/bin
+chmod +x ~/.local/bin/mammotion.py
 ```
 
 ## Usage
