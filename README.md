@@ -129,7 +129,7 @@ This project includes a `SKILL.md` file for use with AI coding agents (Claude Co
 mkdir -p /path/to/agent/skills
 
 # Copy SKILL.md
-cp /path/to/mammotion.py/SKILL.md /path/to/agent/skills/mammotion/SKILL.md
+cp /path/to/mammotion.py/SKILL.md /path/to/agent/skills/mammotion.py/SKILL.md
 
 # Ensure mammotion.py is executable and in PATH
 chmod +x ~/.local/bin/mammotion.py

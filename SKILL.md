@@ -1,5 +1,5 @@
 ---
-name: mammotion
+name: mammotion.py
 description: Control Mammotion robotic mowers (Luba, Yuka) via cloud API. Start/stop mowing jobs, check status, manage areas, view schedules and history. Use when the user wants to control their robot lawn mower.
 compatibility: Requires 'mammotion.py' script in PATH with MAMMOTION_EMAIL and MAMMOTION_PASSWORD environment variables set.
 ---
