@@ -49,9 +49,8 @@ CM_PER_INCH = 2.54
 METERS_TO_MILES = 0.000621371
 SQFT_PER_SQM = 10.764
 
-# auth cache configuration
-AUTH_CACHE_DIR = Path.home() / '.mammotion'
-AUTH_CACHE_FILE = AUTH_CACHE_DIR / 'auth.json'
+# auth cache configuration - single file in home directory, no folder bullshit
+AUTH_CACHE_FILE = Path.home() / '.mammotion.json'
 TOKEN_REFRESH_BUFFER_SECONDS = 5 * 60  # refresh if expiring within 5 minutes
 
 # suppress mqtt cleanup errors
@@ -201,8 +200,6 @@ class MammotionClient:
             return False
 
         try:
-            AUTH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
             cache_data = {
                 'version': 1,
                 'cached_at': int(time.time()),
