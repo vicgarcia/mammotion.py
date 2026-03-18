@@ -21,7 +21,7 @@ A python CLI tool for controlling your Mammotion robotic automower built using t
 
 ```bash
 # Clone and make executable
-git clone <repo>
+git clone https://github.com/vicgarcia/mammotion.py.git
 cd mammotion.py
 chmod +x mammotion.py
 
@@ -129,7 +129,7 @@ This project includes a `SKILL.md` file for use with AI coding agents (Claude Co
 mkdir -p /path/to/agent/skills
 
 # Copy SKILL.md
-cp /path/to/mammotion.py/SKILL.md /path/to/agent/skills/mammotion.py/SKILL.md
+cp /path/to/mammotion.py/SKILL.md /path/to/agent/skills/mammotion/SKILL.md
 
 # Ensure mammotion.py is executable and in PATH
 chmod +x ~/.local/bin/mammotion.py
