@@ -1406,12 +1406,12 @@ def main():
     start_parser.add_argument('--device', required=True, help='device name')
     start_parser.add_argument('--areas', required=True, nargs='+', help='space-separated area names or hashes to mow')
     start_parser.add_argument('--pattern', type=str, default='zigzag', choices=['perimeter', 'zigzag', 'chessboard', 'adaptive'], help='mowing path pattern: perimeter=perimeter only, zigzag=single pass (default), chessboard=cross/chess pattern, adaptive=adaptive zigzag')
-    start_parser.add_argument('--cutting-height', type=float, default=2.8, help='cutting height in inches (2.2-3.9in), default: 2.8in')
+    start_parser.add_argument('--cutting-height', type=float, default=2.5, help='cutting height in inches (2.2-3.9in), default: 2.5in')
     start_parser.add_argument('--path-spacing', type=float, default=10.0, help='spacing between mowing paths in inches (7.9-13.8in), default: 10.0in')
     start_parser.add_argument('--perimeter-laps', type=int, default=2, help='number of border/perimeter laps (0-4), default: 2')
     start_parser.add_argument('--mow-order', type=str, default='grid-first', choices=['perimeter-first', 'grid-first'], help='mowing order: perimeter-first=border then zigzag, grid-first=zigzag then border (default)')
     start_parser.add_argument('--mowing-angle', type=int, default=0, help='mowing angle in degrees (0-359), controls direction of mowing lines, default: 0 (east/west)')
-    start_parser.add_argument('--speed', type=float, default=0.5, help='mowing speed: 0.0 (slow) to 1.0 (fast), default: 0.5')
+    start_parser.add_argument('--speed', type=float, default=0.25, help='mowing speed: 0.0 (slow) to 1.0 (fast), default: 0.25')
     start_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_start(args))
 
     # pause command
