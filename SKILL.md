@@ -18,7 +18,7 @@ export MAMMOTION_PASSWORD="yourpassword"
 
 Or passed directly: `mammotion.py -e email -p password <command>`
 
-Auth tokens are cached automatically at `~/.mammotion/auth.json` for faster subsequent calls.
+Auth tokens are cached automatically at `~/.mammotion.json` for faster subsequent calls. If authentication fails with a cached session, the tool retries with a fresh login automatically.
 
 ## Commands Reference
 

@@ -110,6 +110,10 @@ Or pass them as arguments: `-e you@example.com -p yourpass`
 | `--path-spacing` | 10.0 | Path spacing in inches (7.9-13.8) |
 | `--mowing-angle` | 0 | Mowing angle in degrees (0-359) |
 
+## Authentication Cache
+
+Credentials are cached at `~/.mammotion.json` after first login. If a cached session fails (expired token), the tool retries with a fresh login automatically — no manual intervention needed.
+
 ## RTK Base Stations
 
 RTK base stations are detected automatically. The `status` command shows:
