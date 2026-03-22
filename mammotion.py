@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from pymammotion import MammotionHTTP, CloudIOTGateway
+from pymammotion.utility.device_type import DeviceType
 from pymammotion.mammotion.commands.mammotion_command import MammotionCommand
 from pymammotion.mammotion.devices.mammotion_cloud import MammotionCloud, MammotionBaseCloudDevice
 from pymammotion.mqtt import AliyunMQTT
@@ -514,9 +515,12 @@ class MammotionClient:
             MammotionWorkMode.PAUSE.value,
         )
 
-    async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
-        """get current device state via mqtt."""
-        # set exception handler to suppress mqtt cleanup errors
+    async def _open_mqtt_session(self, device_name: str):
+        """open an mqtt session for a device.
+
+        returns (state_dict, cloud_device, mqtt) on success, or None on failure.
+        caller is responsible for calling mqtt.disconnect() when done.
+        """
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(mqtt_exception_handler)
 
@@ -538,14 +542,20 @@ class MammotionClient:
             )
 
             mqtt.connect_async()
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
-            # request fresh state data
+            # sync device and request fresh state data
+            await cloud_device.queue_command("send_todev_ble_sync", sync_type=3)
+            await asyncio.sleep(1)
             await cloud_device.queue_command("get_report_cfg")
-            await asyncio.sleep(2)
 
-            # get state from state manager
+            # poll until we receive a non-default status (up to ~6s)
             device_obj = state_manager.get_device()
+            for _ in range(6):
+                await asyncio.sleep(1)
+                device_obj = state_manager.get_device()
+                if device_obj.report_data.dev.sys_status != 0:
+                    break
 
             # progress and time are bit-packed in the work fields
             area_raw = device_obj.report_data.work.area
@@ -579,14 +589,23 @@ class MammotionClient:
                 'mileage': device_obj.report_data.maintenance.mileage,
             }
 
-            # cleanup
-            mqtt.disconnect()
-
-            return state
+            return state, cloud_device, mqtt
 
         except Exception as e:
-            logger.exception("get_device_state error")
+            logger.exception("mqtt session error")
             return None
+
+    async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
+        """get current device state via mqtt."""
+        result = await self._open_mqtt_session(device_name)
+        if not result:
+            return None
+        state, _, mqtt = result
+        try:
+            mqtt.disconnect()
+        except Exception:
+            pass
+        return state
 
     async def get_area_list(self, device_name: str) -> list[Any]:
         """get list of areas from device via mqtt."""
@@ -772,7 +791,9 @@ class MammotionClient:
         border_mode = 0 if args.mow_order == 'perimeter-first' else 1
 
         # convert inches to millimeters/centimeters for api
-        blade_height_mm = int(args.cutting_height * MM_PER_INCH)
+        # blade height must be a multiple of 5mm in the range [55, 100]
+        blade_height_mm = round(args.cutting_height * MM_PER_INCH / 5) * 5
+        blade_height_mm = max(55, min(100, blade_height_mm))
         path_spacing_cm = int(args.path_spacing * CM_PER_INCH)
 
         # get areas from device
@@ -804,14 +825,16 @@ class MammotionClient:
             return
 
         # build path_order byte string (encodes border_mode and other settings)
+        # byte 5 = 8 for Luba 2/Pro (DeviceType.is_luba_pro), 0 for Luba 1
+        # this bit flag enables blade motor engagement during autonomous mowing
         path_order_bytes = bytearray(8)
         path_order_bytes[0] = border_mode  # 0=perimeter first, 1=grid first
         path_order_bytes[1] = 1  # obstacle_laps
         path_order_bytes[2] = 0
         path_order_bytes[3] = 0  # start_progress
         path_order_bytes[4] = 0
-        path_order_bytes[5] = 0
-        path_order_bytes[6] = 10  # collect_grass_frequency (not used for luba)
+        path_order_bytes[5] = 8 if DeviceType.is_luba_pro(args.device) else 0
+        path_order_bytes[6] = 10  # collect_grass_frequency
         path_order_bytes[7] = 0
         path_order = path_order_bytes.decode('latin-1')
 
@@ -878,104 +901,80 @@ class MammotionClient:
             except Exception:
                 pass
 
-    async def cmd_pause(self, args) -> None:
-        """pause current job."""
+    async def _run_mqtt_command(self, args, can_run_fn, mqtt_cmd: str, success_msg: str, blocked_msg: str, hint: str = "") -> None:
+        """open an mqtt session, check device state, and send a command if the state allows it."""
         if not self.check_not_rtk(args.device):
             return
 
-        # check current state
         print("checking device status...")
-        state = await self.get_device_state(args.device)
-        if not state:
+        result = await self._open_mqtt_session(args.device)
+        if not result:
             print("failed to get device status")
             return
 
-        if not self.can_pause(state['status']):
-            print(f"cannot pause: device is {state['status_name']}")
-            print("pause only works when mowing is in progress")
-            return
+        state, cloud_device, mqtt = result
+        try:
+            if not can_run_fn(state['status']):
+                print(f"{blocked_msg}: device is {state['status_name']}")
+                if hint:
+                    print(hint)
+                return
 
-        cmd = self.create_command(args.device)
-        command_bytes = cmd.pause_execute_task()
+            await cloud_device.queue_command(mqtt_cmd)
+            await asyncio.sleep(1)
+            print(success_msg)
 
-        if await self.send_command(args.device, command_bytes):
-            print(f"✓ paused {args.device}")
-        else:
-            print("pause command failed")
+        except Exception as e:
+            logger.exception("%s error", mqtt_cmd)
+            print(f"{mqtt_cmd} failed: {e}")
+        finally:
+            try:
+                mqtt.disconnect()
+            except Exception:
+                pass
+
+    async def cmd_pause(self, args) -> None:
+        """pause current job."""
+        await self._run_mqtt_command(
+            args,
+            can_run_fn=self.can_pause,
+            mqtt_cmd="pause_execute_task",
+            success_msg=f"✓ paused {args.device}",
+            blocked_msg="cannot pause",
+            hint="pause only works when mowing is in progress",
+        )
 
     async def cmd_resume(self, args) -> None:
         """resume paused job."""
-        if not self.check_not_rtk(args.device):
-            return
-
-        # check current state
-        print("checking device status...")
-        state = await self.get_device_state(args.device)
-        if not state:
-            print("failed to get device status")
-            return
-
-        if not self.can_resume(state['status']):
-            print(f"cannot resume: device is {state['status_name']}")
-            print("resume only works when mowing is paused")
-            return
-
-        cmd = self.create_command(args.device)
-        command_bytes = cmd.start_job()
-
-        if await self.send_command(args.device, command_bytes):
-            print(f"✓ resumed mowing on {args.device}")
-        else:
-            print("resume command failed")
+        await self._run_mqtt_command(
+            args,
+            can_run_fn=self.can_resume,
+            mqtt_cmd="start_job",
+            success_msg=f"✓ resumed mowing on {args.device}",
+            blocked_msg="cannot resume",
+            hint="resume only works when mowing is paused",
+        )
 
     async def cmd_return(self, args) -> None:
         """return to dock."""
-        if not self.check_not_rtk(args.device):
-            return
-
-        # check current state
-        print("checking device status...")
-        state = await self.get_device_state(args.device)
-        if not state:
-            print("failed to get device status")
-            return
-
-        if not self.can_dock(state['status']):
-            print(f"cannot return to dock: device is {state['status_name']}")
-            return
-
-        cmd = self.create_command(args.device)
-        command_bytes = cmd.return_to_dock()
-
-        if await self.send_command(args.device, command_bytes):
-            print(f"✓ {args.device} returning to dock")
-        else:
-            print("return command failed")
+        await self._run_mqtt_command(
+            args,
+            can_run_fn=self.can_dock,
+            mqtt_cmd="return_to_dock",
+            success_msg=f"✓ {args.device} returning to dock",
+            blocked_msg="cannot return to dock",
+        )
 
     async def cmd_cancel(self, args) -> None:
         """cancel current job."""
-        if not self.check_not_rtk(args.device):
-            return
-
-        # check current state
-        print("checking device status...")
-        state = await self.get_device_state(args.device)
-        if not state:
-            print("failed to get device status")
-            return
-
-        if not self.can_cancel(state['status']):
-            print(f"cannot cancel: device is {state['status_name']}")
-            print("cancel only works when a task is active")
-            return
-
-        cmd = self.create_command(args.device)
-        command_bytes = cmd.cancel_job()
-
-        if await self.send_command(args.device, command_bytes):
-            print(f"✓ cancelled task on {args.device}")
-        else:
-            print("cancel command failed")
+        await self._run_mqtt_command(
+            args,
+            can_run_fn=self.can_cancel,
+            mqtt_cmd="cancel_job",
+            success_msg=f"✓ cancelled task on {args.device}",
+            blocked_msg="cannot cancel",
+            hint="cancel only works when a task is active",
+        )
 
     async def cmd_areas(self, args) -> None:
         """list all areas/zones (requires MQTT)."""
@@ -1367,8 +1366,13 @@ class MammotionClient:
             if not await self.login(email, password, use_cache=use_cache):
                 return 1
 
-            # get devices
+            # get devices — if cached session is stale, retry with fresh login
             devices = await self.get_devices()
+            if devices is None and use_cache:
+                logger.debug("get_devices failed with cached session, retrying with fresh login")
+                if not await self.login(email, password, use_cache=False):
+                    return 1
+                devices = await self.get_devices()
             if devices is None:
                 print("failed to get devices")
                 return 1
@@ -1406,7 +1410,7 @@ def main():
     start_parser.add_argument('--device', required=True, help='device name')
     start_parser.add_argument('--areas', required=True, nargs='+', help='space-separated area names or hashes to mow')
     start_parser.add_argument('--pattern', type=str, default='zigzag', choices=['perimeter', 'zigzag', 'chessboard', 'adaptive'], help='mowing path pattern: perimeter=perimeter only, zigzag=single pass (default), chessboard=cross/chess pattern, adaptive=adaptive zigzag')
-    start_parser.add_argument('--cutting-height', type=float, default=2.5, help='cutting height in inches (2.2-3.9in), default: 2.5in')
+    start_parser.add_argument('--cutting-height', type=float, default=2.5, help='cutting height in inches (2.2-3.9in, snapped to nearest 5mm), default: 2.5in')
     start_parser.add_argument('--path-spacing', type=float, default=10.0, help='spacing between mowing paths in inches (7.9-13.8in), default: 10.0in')
     start_parser.add_argument('--perimeter-laps', type=int, default=2, help='number of border/perimeter laps (0-4), default: 2')
     start_parser.add_argument('--mow-order', type=str, default='grid-first', choices=['perimeter-first', 'grid-first'], help='mowing order: perimeter-first=border then zigzag, grid-first=zigzag then border (default)')
