@@ -1408,7 +1408,7 @@ def main():
     # start command
     start_parser = subparsers.add_parser('start', help='start mowing task with specified areas')
     start_parser.add_argument('--device', required=True, help='device name')
-    start_parser.add_argument('--areas', required=True, nargs='+', help='space-separated area names or hashes to mow')
+    start_parser.add_argument('--areas', required=True, nargs='+', help='area names or hashes to mow (space-separated, no quotes needed)')
     start_parser.add_argument('--pattern', type=str, default='zigzag', choices=['perimeter', 'zigzag', 'chessboard', 'adaptive'], help='mowing path pattern: perimeter=perimeter only, zigzag=single pass (default), chessboard=cross/chess pattern, adaptive=adaptive zigzag')
     start_parser.add_argument('--cutting-height', type=float, default=2.5, help='cutting height in inches (2.2-3.9in, snapped to nearest 5mm), default: 2.5in')
     start_parser.add_argument('--path-spacing', type=float, default=10.0, help='spacing between mowing paths in inches (7.9-13.8in), default: 10.0in')
