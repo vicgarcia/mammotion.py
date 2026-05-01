@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "pymammotion>=0.5.71",
+#     "pymammotion>=0.7.0",
 #     "aiohttp>=3.9.0",
 # ]
 # ///
@@ -409,27 +409,22 @@ class MammotionClient:
             return False
 
     async def get_devices(self) -> list[dict[str, Any]] | None:
-        """get list of devices from cloud. returns None on failure."""
-        if not self.http or not self.cloud_gateway:
-            return None
-
-        resp = await self.http.get_user_device_list()
-        if not resp or resp.code != 0:
+        """get list of devices from cloud (owned + shared). returns None on failure."""
+        if not self.cloud_gateway or not self.cloud_gateway.devices_by_account_response:
             return None
 
         devices = []
-        for dev in resp.data:
-            dev_name = self._get_attr(dev, 'device_name', 'deviceName')
-            iot_id = self._get_attr(dev, 'iot_id', 'iotId')
 
-            # get product_key from cloud_gateway devices_by_account response
-            cloud_dev = self._find_cloud_device(dev_name)
-            product_key = cloud_dev.product_key if cloud_dev else ''
-
+        # use cloud_gateway devices_by_account directly - this includes both owned and shared devices
+        # owned=1 means owned by this account, owned=0 means shared
+        for dev in self.cloud_gateway.devices_by_account_response.data.data:
             devices.append({
-                'device_name': dev_name,
-                'iot_id': iot_id,
-                'product_key': product_key,
+                'device_name': dev.device_name,
+                'iot_id': dev.iot_id,
+                'product_key': dev.product_key,
+                'shared': dev.owned == 0,
+                'nick_name': getattr(dev, 'nick_name', None),
+                'product_name': getattr(dev, 'product_name', None),
             })
 
         self.devices = devices
@@ -591,7 +586,7 @@ class MammotionClient:
 
             return state, cloud_device, mqtt
 
-        except Exception as e:
+        except Exception:
             logger.exception("mqtt session error")
             return None
 
@@ -657,7 +652,7 @@ class MammotionClient:
 
     async def cmd_devices(self, args) -> None:
         """list all devices."""
-        devices = await self.get_devices()
+        devices = self.devices  # already populated by run()
 
         print("\nDevices:")
         print("=" * 70)
@@ -665,10 +660,25 @@ class MammotionClient:
         if not devices:
             print("\nNo devices found.")
         else:
-            for dev in devices:
-                print(f"  {dev['device_name']}")
+            owned = [d for d in devices if not d.get('shared')]
+            shared = [d for d in devices if d.get('shared')]
+
+            if owned:
+                for dev in owned:
+                    print(f"  {dev['device_name']}")
+
+            if shared:
+                if owned:
+                    print()  # blank line between owned and shared
+                print("  Shared with you:")
+                for dev in shared:
+                    print(f"    {dev['device_name']}")
+
             print(f"\n{'=' * 70}")
-            print(f"Total: {len(devices)} device(s)")
+            summary = f"Total: {len(devices)} device(s)"
+            if shared:
+                summary += f" ({len(owned)} owned, {len(shared)} shared)"
+            print(summary)
 
     async def cmd_status(self, args) -> None:
         """show device status."""
@@ -1408,7 +1418,7 @@ def main():
     # start command
     start_parser = subparsers.add_parser('start', help='start mowing task with specified areas')
     start_parser.add_argument('--device', required=True, help='device name')
-    start_parser.add_argument('--areas', required=True, nargs='+', help='space-separated area names or hashes to mow')
+    start_parser.add_argument('--areas', required=True, nargs='+', help='area names or hashes to mow (space-separated, no quotes needed)')
     start_parser.add_argument('--pattern', type=str, default='zigzag', choices=['perimeter', 'zigzag', 'chessboard', 'adaptive'], help='mowing path pattern: perimeter=perimeter only, zigzag=single pass (default), chessboard=cross/chess pattern, adaptive=adaptive zigzag')
     start_parser.add_argument('--cutting-height', type=float, default=2.5, help='cutting height in inches (2.2-3.9in, snapped to nearest 5mm), default: 2.5in')
     start_parser.add_argument('--path-spacing', type=float, default=10.0, help='spacing between mowing paths in inches (7.9-13.8in), default: 10.0in')

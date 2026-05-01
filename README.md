@@ -101,7 +101,7 @@ Or pass them as arguments: `-e you@example.com -p yourpass`
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--areas` | required | Space-separated area names to mow |
+| `--areas` | required | Area names to mow, space-separated, no quotes |
 | `--cutting-height` | 2.8 | Cutting height in inches (2.2-3.9) |
 | `--speed` | 0.5 | Mowing speed: 0.0 (slow) to 1.0 (fast) |
 | `--perimeter-laps` | 2 | Number of border laps (0-4) |

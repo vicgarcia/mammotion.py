@@ -61,7 +61,7 @@ mammotion.py start --device Luba-XXXXXX \
 **Start Options:**
 | Option | Default | Range/Values | Description |
 |--------|---------|--------------|-------------|
-| `--areas` | required | area names | Space-separated area names to mow |
+| `--areas` | required | area names | Area names to mow, space-separated, no quotes |
 | `--pattern` | zigzag | zigzag, chessboard, perimeter, adaptive | Mowing path pattern |
 | `--cutting-height` | 2.8 | 2.2-3.9 inches | Blade cutting height |
 | `--path-spacing` | 10.0 | 7.9-13.8 inches | Distance between mowing passes |
