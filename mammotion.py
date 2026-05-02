@@ -1,48 +1,35 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.14"
 # dependencies = [
-#     "pymammotion>=0.7.0",
-#     "aiohttp>=3.9.0",
+#     "pymammotion>=0.7.90",
 # ]
 # ///
 
 import argparse
 import asyncio
-import base64
-import json
 import logging
 import os
 import sys
-import time
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pymammotion import MammotionHTTP, CloudIOTGateway
+import orjson
+
+from pymammotion.client import MammotionClient
 from pymammotion.utility.device_type import DeviceType
-from pymammotion.mammotion.commands.mammotion_command import MammotionCommand
-from pymammotion.mammotion.devices.mammotion_cloud import MammotionCloud, MammotionBaseCloudDevice
-from pymammotion.mqtt import AliyunMQTT
-from pymammotion.data.model.device import MowingDevice
-from pymammotion.data.mower_state_manager import MowerStateManager
 from pymammotion.data.model.generate_route_information import GenerateRouteInformation
-from pymammotion.aliyun.model.aep_response import AepResponse
-from pymammotion.aliyun.model.connect_response import ConnectResponse
-from pymammotion.aliyun.model.dev_by_account_response import ListingDevAccountResponse
-from pymammotion.aliyun.model.login_by_oauth_response import LoginByOAuthResponse
-from pymammotion.aliyun.model.regions_response import RegionResponse
-from pymammotion.aliyun.model.session_by_authcode_response import SessionByAuthCodeResponse
-from pymammotion.http.model.http import LoginResponseData, JWTTokenInfo
+from pymammotion.messaging.mow_path_saga import MowPathSaga
 
 # setup logging
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# silence noisy mqtt/linkkit loggers (try multiple name variations)
-for logger_name in ["Paho", "paho", "paho.mqtt", "linkkit", "aliyunsdkiotx"]:
-    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+# silence noisy mqtt/asyncio cleanup loggers
+for _noisy in ["mqtt", "paho", "paho.mqtt", "aiomqtt", "asyncio"]:
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
 # conversion constants
 MM_PER_INCH = 25.4
@@ -50,19 +37,8 @@ CM_PER_INCH = 2.54
 METERS_TO_MILES = 0.000621371
 SQFT_PER_SQM = 10.764
 
-# auth cache configuration - single file in home directory, no folder bullshit
+# auth cache
 AUTH_CACHE_FILE = Path.home() / '.mammotion.json'
-TOKEN_REFRESH_BUFFER_SECONDS = 5 * 60  # refresh if expiring within 5 minutes
-
-# suppress mqtt cleanup errors
-def mqtt_exception_handler(loop, context):
-    """suppress expected mqtt cleanup errors."""
-    exception = context.get('exception')
-    if exception and isinstance(exception, TypeError):
-        if 'DataEvent.data_event()' in str(exception):
-            return  # suppress this specific error
-    # let other exceptions through
-    loop.default_exception_handler(context)
 
 
 class MammotionWorkMode(Enum):
@@ -99,7 +75,6 @@ class MammotionWorkMode(Enum):
 
     @classmethod
     def from_value(cls, value: int) -> "MammotionWorkMode | None":
-        """look up mode by int value, returns None if not found."""
         for mode in cls:
             if mode.value == value:
                 return mode
@@ -107,7 +82,6 @@ class MammotionWorkMode(Enum):
 
     @classmethod
     def display_for(cls, value: int) -> str:
-        """get display name for an int value, with fallback for unknown values."""
         mode = cls.from_value(value)
         return mode.display if mode else f"unknown ({value})"
 
@@ -127,7 +101,6 @@ class MammotionRtkLevel(Enum):
 
     @classmethod
     def from_value(cls, value: int) -> "MammotionRtkLevel | None":
-        """look up level by int value, returns None if not found."""
         for level in cls:
             if level.value == value:
                 return level
@@ -135,366 +108,36 @@ class MammotionRtkLevel(Enum):
 
     @classmethod
     def display_for(cls, value: int) -> str:
-        """get display name for an int value, with fallback for unknown values."""
         level = cls.from_value(value)
         return level.display if level else f"unknown ({value})"
 
 
-class MammotionClient:
-    """controller for mammotion mower via cloud http api."""
+
+class MammotionCLI:
+    """CLI wrapper around the PyMammotion client."""
 
     def __init__(self):
-        self.http: MammotionHTTP | None = None
-        self.cloud_gateway: CloudIOTGateway | None = None
+        self._client: MammotionClient = MammotionClient('0.5.31')
         self.devices: list[dict[str, Any]] = []
-        self.user_account: int = 0
+
+    # === helpers ===
 
     def is_rtk_device(self, device_name: str) -> bool:
-        """check if device is an RTK base station (not a mower)."""
         return device_name.upper().startswith("RTK")
 
     def check_not_rtk(self, device_name: str) -> bool:
-        """check device is not RTK, print message if it is. returns True if OK to proceed."""
         if self.is_rtk_device(device_name):
             print("RTK does not support this command")
             return False
         return True
 
-    @staticmethod
-    def _get_attr(obj, *keys, default=''):
-        """get attribute from dict or object, trying multiple key names."""
-        for key in keys:
-            if isinstance(obj, dict):
-                if key in obj:
-                    return obj[key]
-            elif hasattr(obj, key):
-                return getattr(obj, key)
-        return default
-
-    def _create_mqtt_connection(self) -> MammotionCloud:
-        """create mqtt connection for device communication."""
-        return MammotionCloud(
-            AliyunMQTT(
-                region_id=self.cloud_gateway.region_response.data.regionId,
-                product_key=self.cloud_gateway.aep_response.data.productKey,
-                device_name=self.cloud_gateway.aep_response.data.deviceName,
-                device_secret=self.cloud_gateway.aep_response.data.deviceSecret,
-                iot_token=self.cloud_gateway.session_by_authcode_response.data.iotToken,
-                client_id=self.cloud_gateway.client_id,
-                cloud_client=self.cloud_gateway
-            ),
-            cloud_client=self.cloud_gateway
-        )
-
-    def _find_cloud_device(self, device_name: str):
-        """find cloud device object by name from cloud gateway response."""
-        if not self.cloud_gateway or not self.cloud_gateway.devices_by_account_response:
-            return None
-        for dev in self.cloud_gateway.devices_by_account_response.data.data:
-            if dev.device_name == device_name:
-                return dev
-        return None
-
-    def _save_auth_cache(self) -> bool:
-        """save current auth state to cache file."""
-        if not self.http or not self.cloud_gateway:
-            return False
-
-        try:
-            cache_data = {
-                'version': 1,
-                'cached_at': int(time.time()),
-                'http': {
-                    'login_info': self.http.login_info.to_dict() if self.http.login_info else None,
-                    'expires_in': self.http.expires_in,
-                    'jwt_info': self.http.jwt_info.to_dict() if self.http.jwt_info else None,
-                    'account': self.http.account,
-                },
-                'cloud_gateway': {
-                    'region_response': self.cloud_gateway.region_response.to_dict() if self.cloud_gateway.region_response else None,
-                    'connect_response': self.cloud_gateway.connect_response.to_dict() if self.cloud_gateway.connect_response else None,
-                    'login_by_oauth_response': self.cloud_gateway.login_by_oauth_response.to_dict() if self.cloud_gateway.login_by_oauth_response else None,
-                    'aep_response': self.cloud_gateway.aep_response.to_dict() if self.cloud_gateway.aep_response else None,
-                    'session_by_authcode_response': self.cloud_gateway.session_by_authcode_response.to_dict() if self.cloud_gateway.session_by_authcode_response else None,
-                    'devices_by_account_response': self.cloud_gateway.devices_by_account_response.to_dict() if self.cloud_gateway.devices_by_account_response else None,
-                    'iot_token_issued_at': self.cloud_gateway._iot_token_issued_at,
-                    'client_id': self.cloud_gateway._client_id,
-                    'device_sn': self.cloud_gateway._device_sn,
-                    'utdid': self.cloud_gateway._utdid,
-                },
-                'user_account': self.user_account,
-            }
-
-            AUTH_CACHE_FILE.write_text(json.dumps(cache_data, indent=2))
-            logger.debug("saved auth cache to %s", AUTH_CACHE_FILE)
-            return True
-
-        except Exception as e:
-            logger.warning("failed to save auth cache: %s", e)
-            return False
-
-    def _load_auth_cache(self) -> dict | None:
-        """load auth cache from file, returns None if invalid or missing."""
-        if not AUTH_CACHE_FILE.exists():
-            return None
-
-        try:
-            cache_data = json.loads(AUTH_CACHE_FILE.read_text())
-
-            # validate version
-            if cache_data.get('version') != 1:
-                logger.debug("auth cache version mismatch, ignoring")
-                return None
-
-            return cache_data
-
-        except Exception as e:
-            logger.warning("failed to load auth cache: %s", e)
-            return None
-
-    def _is_token_valid(self, cache_data: dict) -> tuple[bool, bool]:
-        """check if cached tokens are still valid.
-
-        returns (iot_token_valid, can_refresh) tuple.
-        """
-        now = int(time.time())
-
-        cg = cache_data.get('cloud_gateway', {})
-        session = cg.get('session_by_authcode_response', {})
-        session_data = session.get('data', {})
-        iot_token_issued_at = cg.get('iot_token_issued_at', 0)
-        iot_token_expire = session_data.get('iotTokenExpire', 0)
-        refresh_token_expire = session_data.get('refreshTokenExpire', 0)
-
-        # check if iot token is still valid (with buffer)
-        iot_token_expiry = iot_token_issued_at + iot_token_expire
-        iot_token_valid = iot_token_expiry > (now + TOKEN_REFRESH_BUFFER_SECONDS)
-
-        # check if refresh token is still valid
-        refresh_token_expiry = iot_token_issued_at + refresh_token_expire
-        can_refresh = refresh_token_expiry > now
-
-        logger.debug("token check: iot_valid=%s, can_refresh=%s, iot_expires_in=%ds, refresh_expires_in=%ds",
-                     iot_token_valid, can_refresh,
-                     iot_token_expiry - now,
-                     refresh_token_expiry - now)
-
-        return iot_token_valid, can_refresh
-
-    async def _restore_from_cache(self, cache_data: dict) -> bool:
-        """restore http and cloud_gateway state from cache data."""
-        try:
-            http_data = cache_data.get('http', {})
-            cg_data = cache_data.get('cloud_gateway', {})
-
-            # restore http client
-            self.http = MammotionHTTP()
-            if http_data.get('login_info'):
-                self.http.login_info = LoginResponseData.from_dict(http_data['login_info'])
-            self.http.expires_in = http_data.get('expires_in', 0)
-            if http_data.get('jwt_info'):
-                self.http.jwt_info = JWTTokenInfo.from_dict(http_data['jwt_info'])
-            self.http.account = http_data.get('account')
-            if self.http.login_info:
-                self.http._headers["Authorization"] = f"Bearer {self.http.login_info.access_token}"
-                # The library expects response.data to contain userInformation
-                # Create a simple wrapper so mqtt.cloud_client.mammotion_http.response.data works
-                class ResponseWrapper:
-                    def __init__(self, data):
-                        self.data = data
-                self.http.response = ResponseWrapper(self.http.login_info)
-
-            # restore cloud gateway with all cached responses
-            self.cloud_gateway = CloudIOTGateway(
-                mammotion_http=self.http,
-                connect_response=ConnectResponse.from_dict(cg_data['connect_response']) if cg_data.get('connect_response') else None,
-                login_by_oauth_response=LoginByOAuthResponse.from_dict(cg_data['login_by_oauth_response']) if cg_data.get('login_by_oauth_response') else None,
-                aep_response=AepResponse.from_dict(cg_data['aep_response']) if cg_data.get('aep_response') else None,
-                session_by_authcode_response=SessionByAuthCodeResponse.from_dict(cg_data['session_by_authcode_response']) if cg_data.get('session_by_authcode_response') else None,
-                region_response=RegionResponse.from_dict(cg_data['region_response']) if cg_data.get('region_response') else None,
-                dev_by_account=ListingDevAccountResponse.from_dict(cg_data['devices_by_account_response']) if cg_data.get('devices_by_account_response') else None,
-            )
-
-            # restore hardware identifiers
-            if cg_data.get('client_id'):
-                self.cloud_gateway._client_id = cg_data['client_id']
-            if cg_data.get('device_sn'):
-                self.cloud_gateway._device_sn = cg_data['device_sn']
-            if cg_data.get('utdid'):
-                self.cloud_gateway._utdid = cg_data['utdid']
-            if cg_data.get('iot_token_issued_at'):
-                self.cloud_gateway._iot_token_issued_at = cg_data['iot_token_issued_at']
-
-            # restore user account
-            self.user_account = cache_data.get('user_account', 0)
-
-            return True
-
-        except Exception as e:
-            logger.warning("failed to restore from cache: %s", e)
-            return False
-
-    async def _try_cached_login(self) -> bool:
-        """attempt to login using cached tokens. returns True on success."""
-        cache_data = self._load_auth_cache()
-        if not cache_data:
-            logger.debug("no auth cache found")
-            return False
-
-        iot_valid, can_refresh = self._is_token_valid(cache_data)
-
-        if not iot_valid and not can_refresh:
-            logger.debug("cached tokens expired and cannot refresh")
-            return False
-
-        # restore state from cache
-        if not await self._restore_from_cache(cache_data):
-            return False
-
-        # if iot token expired but can refresh, do so
-        if not iot_valid and can_refresh:
-            logger.debug("iot token expired, refreshing...")
-            try:
-                await self.cloud_gateway.check_or_refresh_session()
-                # update issued timestamp
-                self.cloud_gateway._iot_token_issued_at = int(time.time())
-                # save refreshed tokens
-                self._save_auth_cache()
-                print("refreshed cached session...")
-            except Exception as e:
-                logger.warning("token refresh failed: %s", e)
-                return False
-        else:
-            print("using cached session...")
-
-        return True
-
-    async def login(self, email: str, password: str, use_cache: bool = True) -> bool:
-        """login to mammotion cloud and setup http client."""
-        # try cached login first
-        if use_cache:
-            if await self._try_cached_login():
-                return True
-            logger.debug("cached login failed, doing fresh login")
-
-        try:
-            self.http = MammotionHTTP()
-
-            # login via http
-            login_resp = await self.http.login_v2(email, password)
-            if not login_resp or login_resp.code != 0:
-                print(f"login failed: {login_resp.msg if login_resp else 'unknown error'}")
-                return False
-
-            # get user account id
-            self.user_account = int(self.http.login_info.userInformation.userAccount)
-
-            # setup cloud gateway
-            self.cloud_gateway = CloudIOTGateway(self.http)
-            await self.cloud_gateway.connect()
-            await self.cloud_gateway.get_region("US")
-            await self.cloud_gateway.login_by_oauth("US")
-            await self.cloud_gateway.aep_handle()
-            await self.cloud_gateway.session_by_auth_code()
-            await self.cloud_gateway.list_binding_by_account()
-
-            # save auth cache for next time
-            self._save_auth_cache()
-
-            return True
-
-        except Exception as e:
-            logger.exception("login error")
-            print(f"login failed: {e}")
-            return False
-
-    async def get_devices(self) -> list[dict[str, Any]] | None:
-        """get list of devices from cloud (owned + shared). returns None on failure."""
-        if not self.cloud_gateway or not self.cloud_gateway.devices_by_account_response:
-            return None
-
-        devices = []
-
-        # use cloud_gateway devices_by_account directly - this includes both owned and shared devices
-        # owned=1 means owned by this account, owned=0 means shared
-        for dev in self.cloud_gateway.devices_by_account_response.data.data:
-            devices.append({
-                'device_name': dev.device_name,
-                'iot_id': dev.iot_id,
-                'product_key': dev.product_key,
-                'shared': dev.owned == 0,
-                'nick_name': getattr(dev, 'nick_name', None),
-                'product_name': getattr(dev, 'product_name', None),
-            })
-
-        self.devices = devices
-        return devices
-
-    async def close(self):
-        """close http session."""
-        if self.http and self.http._session:
-            await self.http._session.close()
-
-    def find_device(self, device_name: str) -> dict[str, Any] | None:
-        """find device by name."""
-        for dev in self.devices:
-            if dev['device_name'] == device_name:
-                return dev
-        return None
-
-    async def send_command(self, device_name: str, command_bytes: bytes) -> bool:
-        """send protobuf command via http mqtt_invoke."""
-        if not self.http:
-            print("not logged in")
-            return False
-
-        device = self.find_device(device_name)
-        if not device:
-            print(f"device not found: {device_name}")
-            return False
-
-        # encode command as base64
-        content = base64.b64encode(command_bytes).decode('utf-8')
-
-        # send via http rpc
-        try:
-            resp = await self.http.mqtt_invoke(
-                content=content,
-                device_name=device['device_name'],
-                iot_id=device['iot_id']
-            )
-
-            if resp.code != 0:
-                print(f"command failed: {resp.msg}")
-                return False
-            return True
-
-        except Exception as e:
-            logger.exception("send_command error")
-            print(f"command failed: {e}")
-            return False
-
-    def create_command(self, device_name: str) -> MammotionCommand:
-        """create command builder for device."""
-        cmd = MammotionCommand(device_name, self.user_account)
-
-        # set product_key for proper device type detection
-        device = self.find_device(device_name)
-        if device and device.get('product_key'):
-            cmd.set_device_product_key(device['product_key'])
-
-        return cmd
-
     def can_pause(self, status: int) -> bool:
-        """check if device can be paused."""
         return status == MammotionWorkMode.WORKING.value
 
     def can_resume(self, status: int) -> bool:
-        """check if device can be resumed."""
         return status in (MammotionWorkMode.PAUSE.value, MammotionWorkMode.CHARGING_PAUSE.value)
 
     def can_cancel(self, status: int) -> bool:
-        """check if there's an active task to cancel."""
         return status in (
             MammotionWorkMode.WORKING.value,
             MammotionWorkMode.PAUSE.value,
@@ -503,156 +146,203 @@ class MammotionClient:
         )
 
     def can_dock(self, status: int) -> bool:
-        """check if device can be sent to dock."""
         return status in (
             MammotionWorkMode.READY.value,
             MammotionWorkMode.WORKING.value,
             MammotionWorkMode.PAUSE.value,
         )
 
-    async def _open_mqtt_session(self, device_name: str):
-        """open an mqtt session for a device.
+    # === cache ===
 
-        returns (state_dict, cloud_device, mqtt) on success, or None on failure.
-        caller is responsible for calling mqtt.disconnect() when done.
-        """
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(mqtt_exception_handler)
+    def _save_cache(self) -> None:
+        try:
+            cache = self._client.to_cache()
+            if cache:
+                AUTH_CACHE_FILE.write_bytes(orjson.dumps(cache, option=orjson.OPT_INDENT_2))
+                logger.debug("saved auth cache to %s", AUTH_CACHE_FILE)
+        except Exception as e:
+            logger.debug("failed to save auth cache: %s", e)
 
-        device = self.find_device(device_name)
-        if not device:
+    def _load_cache(self) -> dict | None:
+        if not AUTH_CACHE_FILE.exists():
+            return None
+        try:
+            data = orjson.loads(AUTH_CACHE_FILE.read_bytes())
+            return data if data else None
+        except Exception as e:
+            logger.warning("failed to load auth cache: %s", e)
             return None
 
+    # === login ===
+
+    async def login(self, email: str, password: str, use_cache: bool = True) -> bool:
+        """login to mammotion cloud."""
+        if use_cache:
+            cache = self._load_cache()
+            if cache:
+                try:
+                    await self._client.restore_credentials(email, password, cache)
+                    return True
+                except Exception as e:
+                    logger.debug("cache restore failed: %s", e)
+
         try:
-            mqtt = self._create_mqtt_connection()
-            cloud_dev = self._find_cloud_device(device['device_name'])
-            if not cloud_dev:
-                return None
+            await self._client.login_and_initiate_cloud(email, password)
+            self._save_cache()
+            return True
+        except Exception as e:
+            logger.exception("login error")
+            print(f"login failed: {e}")
+            return False
 
-            state_manager = MowerStateManager(MowingDevice())
-            cloud_device = MammotionBaseCloudDevice(
-                mqtt=mqtt,
-                cloud_device=cloud_dev,
-                state_manager=state_manager
-            )
+    async def _wait_for_connection(self, timeout: float = 12.0) -> bool:
+        """Wait until at least one MQTT transport is connected."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            session = self._client._get_default_session()
+            if session:
+                al = session.aliyun_transport
+                mm = session.mammotion_transport
+                if (al and al.is_connected) or (mm and mm.is_connected):
+                    return True
+            await asyncio.sleep(0.25)
+        return False
 
-            mqtt.connect_async()
-            await asyncio.sleep(3)
+    # === device listing ===
 
-            # sync device and request fresh state data
-            await cloud_device.queue_command("send_todev_ble_sync", sync_type=3)
-            await asyncio.sleep(1)
-            await cloud_device.queue_command("get_report_cfg")
+    async def get_devices(self) -> list[dict[str, Any]]:
+        devices = []
+        seen: set[str] = set()
 
-            # poll until we receive a non-default status (up to ~6s)
-            device_obj = state_manager.get_device()
-            for _ in range(6):
+        for dev in self._client.aliyun_device_list:
+            name = getattr(dev, 'device_name', None)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            devices.append({
+                'device_name': name,
+                'iot_id': getattr(dev, 'iot_id', ''),
+                'product_key': getattr(dev, 'product_key', ''),
+                'shared': getattr(dev, 'owned', 1) == 0,
+                'nick_name': getattr(dev, 'nick_name', None),
+                'product_name': getattr(dev, 'product_name', None),
+            })
+
+        for dev in self._client.mammotion_device_list:
+            name = getattr(dev, 'device_name', None)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            devices.append({
+                'device_name': name,
+                'iot_id': getattr(dev, 'iot_id', ''),
+                'product_key': getattr(dev, 'product_key', ''),
+                'shared': False,
+                'nick_name': getattr(dev, 'nick_name', None),
+                'product_name': getattr(dev, 'product_name', None),
+            })
+
+        self.devices = devices
+        return devices
+
+    def find_device(self, device_name: str) -> dict[str, Any] | None:
+        for dev in self.devices:
+            if dev['device_name'] == device_name:
+                return dev
+        return None
+
+    # === device state ===
+
+    async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
+        """get current device state via MQTT."""
+        try:
+            await self._client.send_command_with_args(device_name, "get_report_cfg")
+
+            # poll until we get a non-default status (up to ~8s)
+            for _ in range(8):
                 await asyncio.sleep(1)
-                device_obj = state_manager.get_device()
-                if device_obj.report_data.dev.sys_status != 0:
+                device = self._client.get_device_by_name(device_name)
+                if device and device.report_data.dev.sys_status != 0:
                     break
 
+            device = self._client.get_device_by_name(device_name)
+            if not device:
+                return None
+
             # progress and time are bit-packed in the work fields
-            area_raw = device_obj.report_data.work.area
-            progress_raw = device_obj.report_data.work.progress
+            area_raw = device.report_data.work.area
+            progress_raw = device.report_data.work.progress
 
             # get position from locations list if available
             pos_x, pos_y, heading = 0, 0, 0
-            if device_obj.report_data.locations:
-                loc = device_obj.report_data.locations[0]
+            if device.report_data.locations:
+                loc = device.report_data.locations[0]
                 pos_x = loc.real_pos_x
                 pos_y = loc.real_pos_y
                 heading = loc.real_toward
 
-            state = {
-                'status': device_obj.report_data.dev.sys_status,
-                'status_name': MammotionWorkMode.display_for(device_obj.report_data.dev.sys_status),
-                'battery': device_obj.report_data.dev.battery_val,
-                'progress': area_raw >> 16,  # upper 16 bits = progress %
-                'total_time_min': progress_raw & 65535,  # lower 16 bits = total time in minutes
-                'time_left_min': progress_raw >> 16,  # upper 16 bits = time left in minutes
+            return {
+                'status': device.report_data.dev.sys_status,
+                'status_name': MammotionWorkMode.display_for(device.report_data.dev.sys_status),
+                'battery': device.report_data.dev.battery_val,
+                'progress': area_raw >> 16,
+                'total_time_min': progress_raw & 65535,
+                'time_left_min': progress_raw >> 16,
                 'pos_x': pos_x,
                 'pos_y': pos_y,
                 'heading': heading,
-                'blade_height': device_obj.report_data.work.knife_height,
-                'gps_stars': device_obj.report_data.rtk.gps_stars,
-                'co_view_stars': device_obj.report_data.rtk.co_view_stars,
-                'rtk_status': device_obj.report_data.rtk.status,
-                'rtk_pos_level': device_obj.report_data.rtk.pos_level,
-                'rtk_dis_status': device_obj.report_data.rtk.dis_status,
-                'lifetime_hours': device_obj.report_data.maintenance.work_time,
-                'mileage': device_obj.report_data.maintenance.mileage,
+                'blade_height': device.report_data.work.knife_height,
+                'gps_stars': device.report_data.rtk.gps_stars,
+                'co_view_stars': device.report_data.rtk.co_view_stars,
+                'rtk_status': device.report_data.rtk.status,
+                'rtk_pos_level': device.report_data.rtk.pos_level,
+                'rtk_dis_status': device.report_data.rtk.dis_status,
+                'lifetime_hours': device.report_data.maintenance.work_time,
+                'mileage': device.report_data.maintenance.mileage,
             }
 
-            return state, cloud_device, mqtt
-
         except Exception:
-            logger.exception("mqtt session error")
+            logger.exception("get_device_state error")
             return None
 
-    async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
-        """get current device state via mqtt."""
-        result = await self._open_mqtt_session(device_name)
-        if not result:
-            return None
-        state, _, mqtt = result
-        try:
-            mqtt.disconnect()
-        except Exception:
-            pass
-        return state
+    # === area list ===
 
     async def get_area_list(self, device_name: str) -> list[Any]:
-        """get list of areas from device via mqtt."""
-        # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(mqtt_exception_handler)
+        """fetch area names directly from device — single request/response, no saga."""
+        try:
+            # get_area_name_list requires the device's iot_id; look it up from registered devices
+            handle = self._client.mower(device_name)
+            iot_id = handle.iot_id if handle else ""
 
-        device = self.find_device(device_name)
+            # get_area_name_list → device replies with toapp_all_hash_name
+            # the response is applied to device.map.area_name by the state reducer
+            await self._client.send_command_and_wait(
+                device_name,
+                "get_area_name_list",
+                "toapp_all_hash_name",
+                send_timeout=15.0,
+                device_id=iot_id,
+            )
+        except Exception as e:
+            logger.warning("get_area_name_list error: %s", e)
+
+        device = self._client.get_device_by_name(device_name)
         if not device:
             return []
+        return list(device.map.area_name) if device.map.area_name else []
 
-        mqtt = self._create_mqtt_connection()
-        cloud_dev = self._find_cloud_device(device['device_name'])
-        if not cloud_dev:
-            return []
+    # === stop ===
 
-        state_manager = MowerStateManager(MowingDevice())
-        cloud_device = MammotionBaseCloudDevice(
-            mqtt=mqtt,
-            cloud_device=cloud_dev,
-            state_manager=state_manager
-        )
+    async def stop(self) -> None:
+        try:
+            await self._client.stop()
+        except Exception:
+            pass
 
-        mqtt.connect_async()
-        await asyncio.sleep(3)
-        await cloud_device.queue_command("send_todev_ble_sync", sync_type=3)
-        await asyncio.sleep(1)
-        await cloud_device.queue_command("get_area_name_list", device_id=device['iot_id'])
-        await asyncio.sleep(1)
-        await cloud_device.queue_command("get_all_boundary_hash_list", sub_cmd=0)
-
-        # poll for areas
-        max_retries = 10
-        for _ in range(max_retries):
-            await asyncio.sleep(2)
-            device_obj = state_manager.get_device()
-            if device_obj.map.area_name:
-                break
-
-        # get final area list
-        device_obj = state_manager.get_device()
-        areas = list(device_obj.map.area_name) if device_obj.map.area_name else []
-
-        # cleanup
-        mqtt.disconnect()
-
-        return areas
     # === command handlers ===
 
     async def cmd_devices(self, args) -> None:
-        """list all devices."""
-        devices = self.devices  # already populated by run()
+        devices = self.devices
 
         print("\nDevices:")
         print("=" * 70)
@@ -669,7 +359,7 @@ class MammotionClient:
 
             if shared:
                 if owned:
-                    print()  # blank line between owned and shared
+                    print()
                 print("  Shared with you:")
                 for dev in shared:
                     print(f"    {dev['device_name']}")
@@ -681,96 +371,74 @@ class MammotionClient:
             print(summary)
 
     async def cmd_status(self, args) -> None:
-        """show device status."""
-        # handle RTK devices differently
+        print(f"\nStatus for {args.device}:")
+        print("=" * 70)
+
         if self.is_rtk_device(args.device):
-            await self.cmd_status_rtk(args)
-            return
+            # RTK base station — look up from device list, no MQTT state query needed
+            cloud_dev = None
+            for dev in self._client.aliyun_device_list:
+                if dev.device_name == args.device:
+                    cloud_dev = dev
+                    break
 
-        print("retrieving device status...")
-        state = await self.get_device_state(args.device)
+            if not cloud_dev:
+                print(f"device not found: {args.device}")
+                return
 
-        if not state:
-            print("failed to get device status")
-            return
+            print("  Type: RTK Base Station")
+            print(f"  Status: {'online' if getattr(cloud_dev, 'status', 0) == 1 else 'offline'}")
+            if getattr(cloud_dev, 'product_name', None):
+                print(f"  Product: {cloud_dev.product_name}")
+            if getattr(cloud_dev, 'product_model', None):
+                print(f"  Model: {cloud_dev.product_model}")
+        else:
+            state = await self.get_device_state(args.device)
 
-        print(f"\nStatus for {args.device}:")
-        print("=" * 70)
-        print(f"  Status: {state['status_name']}")
-        print(f"  Battery: {state['battery']}%")
+            if not state:
+                print("failed to get device status")
+                return
 
-        # show progress if mowing or paused
-        if state['status'] in (
-            MammotionWorkMode.WORKING.value,
-            MammotionWorkMode.PAUSE.value,
-            MammotionWorkMode.CHARGING_PAUSE.value,
-        ):
-            print(f"  Progress: {state['progress']}%")
-            if state['time_left_min'] > 0:
-                hours = state['time_left_min'] // 60
-                mins = state['time_left_min'] % 60
-                print(f"  Time remaining: {hours}h {mins}m")
+            print(f"  Status: {state['status_name']}")
+            print(f"  Battery: {state['battery']}%")
 
-        # show position if available
-        if state['pos_x'] != 0 or state['pos_y'] != 0:
-            # convert mm to meters for display
-            x_m = state['pos_x'] / 1000
-            y_m = state['pos_y'] / 1000
-            heading_deg = (state['heading'] / 100) % 360
+            if state['status'] in (
+                MammotionWorkMode.WORKING.value,
+                MammotionWorkMode.PAUSE.value,
+                MammotionWorkMode.CHARGING_PAUSE.value,
+            ):
+                print(f"  Progress: {state['progress']}%")
+                if state['time_left_min'] > 0:
+                    hours = state['time_left_min'] // 60
+                    mins = state['time_left_min'] % 60
+                    print(f"  Time remaining: {hours}h {mins}m")
 
-            print(f"  Position: ({x_m:.1f}m, {y_m:.1f}m) heading {heading_deg:.0f}°")
+            if state['pos_x'] != 0 or state['pos_y'] != 0:
+                x_m = state['pos_x'] / 1000
+                y_m = state['pos_y'] / 1000
+                heading_deg = (state['heading'] / 100) % 360
+                print(f"  Position: ({x_m:.1f}m, {y_m:.1f}m) heading {heading_deg:.0f}°")
 
-        # show blade height if relevant
-        if state['blade_height'] > 0:
-            blade_height_in = state['blade_height'] / MM_PER_INCH
-            print(f"  Blade height: {state['blade_height']}mm ({blade_height_in:.1f}in)")
+            if state['blade_height'] > 0:
+                blade_height_in = state['blade_height'] / MM_PER_INCH
+                print(f"  Blade height: {state['blade_height']}mm ({blade_height_in:.1f}in)")
 
-        # rtk/gps status
-        if state['gps_stars'] > 0:
-            rtk_level = MammotionRtkLevel.display_for(state['rtk_pos_level'])
-            print(f"  RTK: {rtk_level} | GPS: {state['gps_stars']} satellites")
+            if state['gps_stars'] > 0:
+                rtk_level = MammotionRtkLevel.display_for(state['rtk_pos_level'])
+                print(f"  RTK: {rtk_level} | GPS: {state['gps_stars']} satellites")
 
-        # maintenance stats
-        if state['lifetime_hours'] > 0:
-            hours = state['lifetime_hours'] // 3600
-            print(f"  Lifetime work time: {hours}h")
-        if state['mileage'] > 0:
-            miles = state['mileage'] * METERS_TO_MILES
-            print(f"  Total mileage: {miles:.1f} miles")
+            if state['lifetime_hours'] > 0:
+                hours = state['lifetime_hours'] // 3600
+                print(f"  Lifetime work time: {hours}h")
+            if state['mileage'] > 0:
+                miles = state['mileage'] * METERS_TO_MILES
+                print(f"  Total mileage: {miles:.1f} miles")
 
-        print("=" * 70)
-
-    async def cmd_status_rtk(self, args) -> None:
-        """show RTK base station status."""
-        # get device info from cloud gateway
-        cloud_dev = None
-        for dev in self.cloud_gateway.devices_by_account_response.data.data:
-            if dev.device_name == args.device:
-                cloud_dev = dev
-                break
-
-        if not cloud_dev:
-            print(f"device not found: {args.device}")
-            return
-
-        print(f"\nStatus for {args.device}:")
-        print("=" * 70)
-        print(f"  Type: RTK Base Station")
-        print(f"  Status: {'online' if cloud_dev.status == 1 else 'offline'}")
-        if cloud_dev.product_name:
-            print(f"  Product: {cloud_dev.product_name}")
-        if cloud_dev.product_model:
-            print(f"  Model: {cloud_dev.product_model}")
         print("=" * 70)
 
     async def cmd_start(self, args) -> None:
-        """start mowing task with specified areas."""
         if not self.check_not_rtk(args.device):
             return
-
-        # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(mqtt_exception_handler)
 
         # validate inputs
         if args.speed < 0.0 or args.speed > 1.0:
@@ -816,7 +484,6 @@ class MammotionClient:
         # resolve area names/hashes from arguments
         area_hashes = []
         for area_input in args.areas:
-            # try to match by name or hash
             matched = False
             for area in areas:
                 if area.name == area_input or str(area.hash) == area_input:
@@ -824,7 +491,6 @@ class MammotionClient:
                     matched = True
                     print(f"  - {area.name} (hash: {area.hash})")
                     break
-
             if not matched:
                 print(f"error: area '{area_input}' not found")
                 print(f"available areas: {', '.join([a.name for a in areas])}")
@@ -834,14 +500,13 @@ class MammotionClient:
             print("error: no valid areas specified")
             return
 
-        # build path_order byte string (encodes border_mode and other settings)
-        # byte 5 = 8 for Luba 2/Pro (DeviceType.is_luba_pro), 0 for Luba 1
-        # this bit flag enables blade motor engagement during autonomous mowing
+        # build path_order byte string
+        # byte 5 = 8 for Luba 2/Pro, 0 for Luba 1 (enables blade motor during autonomous mowing)
         path_order_bytes = bytearray(8)
-        path_order_bytes[0] = border_mode  # 0=perimeter first, 1=grid first
-        path_order_bytes[1] = 1  # obstacle_laps
+        path_order_bytes[0] = border_mode
+        path_order_bytes[1] = 1   # obstacle_laps
         path_order_bytes[2] = 0
-        path_order_bytes[3] = 0  # start_progress
+        path_order_bytes[3] = 0   # start_progress
         path_order_bytes[4] = 0
         path_order_bytes[5] = 8 if DeviceType.is_luba_pro(args.device) else 0
         path_order_bytes[6] = 10  # collect_grass_frequency
@@ -857,271 +522,207 @@ class MammotionClient:
             one_hashs=area_hashes,
             speed=args.speed,
             blade_height=blade_height_mm,
-            ultra_wave=2,  # less touch obstacle detection
+            ultra_wave=2,
             channel_mode=channel_mode,
             channel_width=path_spacing_cm,
             edge_mode=args.perimeter_laps,
-            job_mode=4,  # standard task mode
+            job_mode=4,
             toward=args.mowing_angle,
             toward_included_angle=0,
-            toward_mode=1,  # 1 = absolute angle
+            toward_mode=1,
             path_order=path_order,
         )
 
-        # setup mqtt connection to send commands
-        device = self.find_device(args.device)
-        if not device:
-            print(f"device not found: {args.device}")
-            return
-
         try:
-            mqtt = self._create_mqtt_connection()
-            cloud_dev = self._find_cloud_device(device['device_name'])
-            if not cloud_dev:
-                print(f"cloud device not found for {device['device_name']}")
+            # start_mow_path_saga (and send_command_with_args) just enqueue work and return
+            # immediately — the queue processor runs them asynchronously. if we return from
+            # cmd_start before they execute, stop() cancels the queue and neither runs.
+            # fix: build the saga ourselves, send start_job inside on_complete (which runs
+            # after the saga finishes), and await an event so we don't return until done.
+
+            handle = self._client.mower(args.device)
+            if not handle:
+                print(f"device not found: {args.device}")
                 return
 
-            state_manager = MowerStateManager(MowingDevice())
-            cloud_device = MammotionBaseCloudDevice(
-                mqtt=mqtt,
-                cloud_device=cloud_dev,
-                state_manager=state_manager
+            _iot_id = handle.iot_id
+
+            async def _send_cmd(cmd: bytes) -> None:
+                await handle.active_transport().send(cmd, iot_id=_iot_id)
+
+            saga = MowPathSaga(
+                command_builder=handle.commands,
+                send_command=_send_cmd,
+                get_map=lambda: handle.snapshot.raw.map,
+                zone_hashs=area_hashes,
+                route_info=route_info,
+                device_name=args.device,
             )
 
-            mqtt.connect_async()
-            await asyncio.sleep(2)
+            saga_done = asyncio.Event()
+            saga_failed = asyncio.Event()
 
-            # send generate route command
-            await cloud_device.queue_command("generate_route_information", generate_route_information=route_info)
-            await asyncio.sleep(2)
+            # override execute() so the done/failed events are always set,
+            # even when the saga raises — on_complete is only called on success
+            original_execute = saga.execute
 
-            # start job
-            await cloud_device.queue_command("start_job")
-            await asyncio.sleep(1)
+            async def _execute_with_signal(broker):
+                try:
+                    await original_execute(broker)
+                except Exception:
+                    saga_failed.set()
+                    saga_done.set()
+                    raise
 
-            print(f"✓ started mowing task on {args.device}")
+            saga.execute = _execute_with_signal
+
+            async def _on_complete():
+                # exclusive lock is released before on_complete runs; send start_job directly
+                await _send_cmd(handle.commands.start_job())
+                saga_done.set()
+
+            await handle.enqueue_saga(saga, on_complete=_on_complete)
+
+            # wait for the saga + start_job to actually execute (up to 90s for route planning)
+            try:
+                await asyncio.wait_for(saga_done.wait(), timeout=90.0)
+                if saga_failed.is_set():
+                    print("route planning failed — check device is ready and has a valid map")
+                else:
+                    print(f"started mowing task on {args.device}")
+            except asyncio.TimeoutError:
+                print("route planning timed out — mowing task may not have started")
 
         except Exception as e:
             logger.exception("start command error")
             print(f"start command failed: {e}")
-        finally:
-            # disconnect and suppress cleanup errors
-            try:
-                mqtt.disconnect()
-            except Exception:
-                pass
 
-    async def _run_mqtt_command(self, args, can_run_fn, mqtt_cmd: str, success_msg: str, blocked_msg: str, hint: str = "") -> None:
-        """open an mqtt session, check device state, and send a command if the state allows it."""
+    async def _run_command_with_state_check(
+        self,
+        args,
+        can_run_fn,
+        cmd: str,
+        success_msg: str,
+        blocked_msg: str,
+        hint: str = "",
+    ) -> None:
+        """check device state then send command if state allows it."""
         if not self.check_not_rtk(args.device):
             return
 
-        print("checking device status...")
-        result = await self._open_mqtt_session(args.device)
-        if not result:
+        state = await self.get_device_state(args.device)
+        if not state:
             print("failed to get device status")
             return
 
-        state, cloud_device, mqtt = result
-        try:
-            if not can_run_fn(state['status']):
-                print(f"{blocked_msg}: device is {state['status_name']}")
-                if hint:
-                    print(hint)
-                return
+        if not can_run_fn(state['status']):
+            print(f"{blocked_msg}: device is {state['status_name']}")
+            if hint:
+                print(hint)
+            return
 
-            await cloud_device.queue_command(mqtt_cmd)
+        try:
+            await self._client.send_command_with_args(args.device, cmd)
             await asyncio.sleep(1)
             print(success_msg)
-
         except Exception as e:
-            logger.exception("%s error", mqtt_cmd)
-            print(f"{mqtt_cmd} failed: {e}")
-        finally:
-            try:
-                mqtt.disconnect()
-            except Exception:
-                pass
+            logger.exception("%s error", cmd)
+            print(f"{cmd} failed: {e}")
 
     async def cmd_pause(self, args) -> None:
-        """pause current job."""
-        await self._run_mqtt_command(
+        await self._run_command_with_state_check(
             args,
             can_run_fn=self.can_pause,
-            mqtt_cmd="pause_execute_task",
-            success_msg=f"✓ paused {args.device}",
+            cmd="pause_execute_task",
+            success_msg=f"paused {args.device}",
             blocked_msg="cannot pause",
             hint="pause only works when mowing is in progress",
         )
 
     async def cmd_resume(self, args) -> None:
-        """resume paused job."""
-        await self._run_mqtt_command(
+        await self._run_command_with_state_check(
             args,
             can_run_fn=self.can_resume,
-            mqtt_cmd="start_job",
-            success_msg=f"✓ resumed mowing on {args.device}",
+            cmd="start_job",
+            success_msg=f"resumed mowing on {args.device}",
             blocked_msg="cannot resume",
             hint="resume only works when mowing is paused",
         )
 
     async def cmd_return(self, args) -> None:
-        """return to dock."""
-        await self._run_mqtt_command(
+        await self._run_command_with_state_check(
             args,
             can_run_fn=self.can_dock,
-            mqtt_cmd="return_to_dock",
-            success_msg=f"✓ {args.device} returning to dock",
+            cmd="return_to_dock",
+            success_msg=f"{args.device} returning to dock",
             blocked_msg="cannot return to dock",
         )
 
     async def cmd_cancel(self, args) -> None:
-        """cancel current job."""
-        await self._run_mqtt_command(
+        await self._run_command_with_state_check(
             args,
             can_run_fn=self.can_cancel,
-            mqtt_cmd="cancel_job",
-            success_msg=f"✓ cancelled task on {args.device}",
+            cmd="cancel_job",
+            success_msg=f"cancelled task on {args.device}",
             blocked_msg="cannot cancel",
             hint="cancel only works when a task is active",
         )
 
     async def cmd_areas(self, args) -> None:
-        """list all areas/zones (requires MQTT)."""
         if not self.check_not_rtk(args.device):
             return
 
-        print("setting up mqtt connection to retrieve areas...")
+        areas = await self.get_area_list(args.device)
 
-        # setup mqtt for this device
-        device = self.find_device(args.device)
-        if not device:
-            print(f"device not found: {args.device}")
-            return
+        print(f"\nAreas for {args.device}:")
+        print("=" * 70)
 
-        try:
-            mqtt = self._create_mqtt_connection()
-            cloud_dev = self._find_cloud_device(device['device_name'])
-            if not cloud_dev:
-                print(f"cloud device not found for {device['device_name']}")
-                return
-
-            state_manager = MowerStateManager(MowingDevice())
-            cloud_device = MammotionBaseCloudDevice(
-                mqtt=mqtt,
-                cloud_device=cloud_dev,
-                state_manager=state_manager
-            )
-
-            mqtt.connect_async()
-            await asyncio.sleep(3)
-
-            # sync device state first
-            await cloud_device.queue_command("send_todev_ble_sync", sync_type=3)
-            await asyncio.sleep(1)
-
-            # request area list
-            await cloud_device.queue_command("get_area_name_list", device_id=device['iot_id'])
-            await asyncio.sleep(1)
-
-            # get boundary hash list (triggers map load)
-            await cloud_device.queue_command("get_all_boundary_hash_list", sub_cmd=0)
-
-            # poll for map data to load
-            print("waiting for map data...")
-            max_retries = 10
-            for _ in range(max_retries):
-                await asyncio.sleep(2)
-                device_obj = state_manager.get_device()
-                if device_obj.map.area_name:
-                    break
-
-            # get areas from state manager
-            device_obj = state_manager.get_device()
-
-            print(f"\nAreas for {args.device}:")
-            print("=" * 70)
-
-            if device_obj.map.area_name:
-                for area in device_obj.map.area_name:
-                    print(f"  {area.name} (hash: {area.hash})")
-                print(f"\n{'=' * 70}")
-                print(f"Total: {len(device_obj.map.area_name)} area(s)")
-            else:
-                print("\nNo areas found.")
-                print("Try running again or check if map exists in the app.")
-
-            # disconnect
-            mqtt.disconnect()
-
-        except Exception as e:
-            logger.exception("areas command error")
-            print(f"failed to get areas: {e}")
+        if areas:
+            for area in areas:
+                print(f"  {area.name} (hash: {area.hash})")
+            print(f"\n{'=' * 70}")
+            print(f"Total: {len(areas)} area(s)")
+        else:
+            print("\nNo areas found.")
+            print("Try running again or check if map exists in the app.")
 
     async def cmd_schedules(self, args) -> None:
-        """list scheduled mowing tasks."""
         if not self.check_not_rtk(args.device):
             return
 
-        # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(mqtt_exception_handler)
-
-        device = self.find_device(args.device)
-        if not device:
+        if not self.find_device(args.device):
             print(f"device not found: {args.device}")
             return
 
         try:
-            # get area names first for mapping zone hashes
-            print("retrieving area names...")
             areas = await self.get_area_list(args.device)
             area_map = {area.hash: area.name for area in areas} if areas else {}
 
-            print("connecting to retrieve schedules...")
-            mqtt = self._create_mqtt_connection()
-            cloud_dev = self._find_cloud_device(device['device_name'])
-            if not cloud_dev:
-                print(f"cloud device not found for {device['device_name']}")
-                return
-
-            state_manager = MowerStateManager(MowingDevice())
-            cloud_device = MammotionBaseCloudDevice(
-                mqtt=mqtt,
-                cloud_device=cloud_dev,
-                state_manager=state_manager
-            )
-
-            mqtt.connect_async()
-            await asyncio.sleep(2)
-
             # request plan data - sub_cmd=2 reads plans, plan_index=0 starts from first
-            print("requesting schedule data...")
-            await cloud_device.queue_command("read_plan", sub_cmd=2, plan_index=0)
+            await self._client.send_command_with_args(args.device, "read_plan", sub_cmd=2, plan_index=0)
 
             # poll for plans to arrive
-            max_retries = 10
-            for _ in range(max_retries):
+            for _ in range(10):
                 await asyncio.sleep(2)
-                device_obj = state_manager.get_device()
-                plans = device_obj.map.plan
+                dev_state = self._client.get_device_by_name(args.device)
+                if not dev_state:
+                    continue
+                plans = dev_state.map.plan
                 if plans:
+                    first_plan = list(plans.values())[0]
                     # check if we have all plans
-                    first_plan = list(plans.values())[0] if plans else None
-                    if first_plan and first_plan.total_plan_num == len(plans):
+                    if first_plan.total_plan_num == len(plans):
                         break
                     # request next plan if more exist
-                    if first_plan and len(plans) < first_plan.total_plan_num:
-                        await cloud_device.queue_command("read_plan", sub_cmd=2, plan_index=len(plans))
+                    if len(plans) < first_plan.total_plan_num:
+                        await self._client.send_command_with_args(
+                            args.device, "read_plan", sub_cmd=2, plan_index=len(plans)
+                        )
 
             # get final plans
-            device_obj = state_manager.get_device()
-            plans = device_obj.map.plan
+            dev_state = self._client.get_device_by_name(args.device)
+            plans = dev_state.map.plan if dev_state else {}
 
-            # disconnect
-            mqtt.disconnect()
-
-            # display schedules
             print(f"\nSchedules for {args.device}:")
             print("=" * 70)
 
@@ -1136,42 +737,30 @@ class MammotionClient:
                 for idx, (plan_id, plan) in enumerate(plans.items(), 1):
                     print(f"\n[{idx}/{len(plans)}] Schedule: {plan.task_name or plan.job_name or plan_id}")
 
-                    # time range
                     if plan.start_time:
                         print(f"  Start time:  {plan.start_time}")
                     if plan.end_time:
                         print(f"  End time:    {plan.end_time}")
-
-                    # date range
                     if plan.start_date:
                         print(f"  Start date:  {plan.start_date}")
                     if plan.end_date:
                         print(f"  End date:    {plan.end_date}")
 
-                    # days of week
                     if plan.weeks:
                         days = [day_names.get(d, str(d)) for d in plan.weeks]
                         print(f"  Days:        {', '.join(days)}")
                     elif plan.week:
-                        # single day
                         print(f"  Day:         {day_names.get(plan.week, str(plan.week))}")
 
-                    # zones/areas
                     if plan.zone_hashs:
-                        zone_names = []
-                        for zh in plan.zone_hashs:
-                            if zh in area_map:
-                                zone_names.append(area_map[zh])
-                            else:
-                                zone_names.append(f"hash:{zh}")
+                        zone_names = [area_map.get(zh, f"hash:{zh}") for zh in plan.zone_hashs]
                         print(f"  Areas:       {', '.join(zone_names)}")
 
-                    # mowing settings
                     if plan.knife_height > 0:
                         height_in = plan.knife_height / MM_PER_INCH
                         print(f"  Blade:       {plan.knife_height}mm ({height_in:.1f}\")")
 
-                    if plan.route_model >= 0:
+                    if plan.route_model is not None and plan.route_model > 0:
                         pattern = pattern_names.get(plan.route_model, f"mode {plan.route_model}")
                         print(f"  Pattern:     {pattern}")
 
@@ -1185,7 +774,6 @@ class MammotionClient:
                     if plan.edge_mode > 0:
                         print(f"  Border laps: {plan.edge_mode}")
 
-                    # IDs for reference
                     if args.verbose:
                         print(f"  [DEBUG] plan_id={plan.plan_id}, task_id={plan.task_id}")
                         print(f"  [DEBUG] work_time={plan.work_time}, required_time={plan.required_time}, area={plan.area}")
@@ -1198,86 +786,75 @@ class MammotionClient:
             print(f"failed to get schedules: {e}")
 
     async def cmd_reports(self, args) -> None:
-        """get mowing job history reports."""
         if not self.check_not_rtk(args.device):
             return
 
-        # set exception handler to suppress mqtt cleanup errors
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(mqtt_exception_handler)
-
-        device = self.find_device(args.device)
-        if not device:
+        if not self.find_device(args.device):
             print(f"device not found: {args.device}")
             return
 
-        # storage for work reports
-        work_reports = []
-        reports_received = asyncio.Event()
-
-        # callback to capture work reports from MQTT messages
-        async def capture_work_reports(res: tuple[str, Any]):
-            try:
-                import betterproto2
-                # res is a tuple of (submsg_type, submsg_data) from which_one_of(message, "LubaSubMsg")
-                msg_type, nav_msg_obj = res
-
-                # check if this is a nav message
-                if msg_type == "nav" and nav_msg_obj:
-                    # now parse the nav submessage to see what kind it is
-                    nav_msg = betterproto2.which_one_of(nav_msg_obj, "SubNavMsg")
-                    if nav_msg[0] in ("toapp_work_report_ack", "toapp_work_report_upload"):
-                        report = nav_msg[1]
-                        work_reports.append(report)
-                        # check if we got all reports
-                        if report.current_ack_num == report.total_ack_num and report.current_ack_num > 0:
-                            reports_received.set()
-            except Exception as e:
-                logger.debug(f"error parsing work report: {e}")
-
         try:
-            mqtt = self._create_mqtt_connection()
-            cloud_dev = self._find_cloud_device(device['device_name'])
-            if not cloud_dev:
-                print(f"cloud device not found for {device['device_name']}")
+            # wrap the reducer's apply() to intercept work report messages before
+            # they're deep-copied and overwrite the previous record — this is the
+            # only reliable hook since the reducer deep-copies work_session_result
+            # on every toapp_work_report_ack, making subclassing useless
+            handle = self._client.mower(args.device)
+            if not handle:
+                print(f"device not found: {args.device}")
                 return
+            work_reports: list[dict] = []
+            original_apply = handle._reducer.apply
 
-            state_manager = MowerStateManager(MowingDevice())
-            cloud_device = MammotionBaseCloudDevice(
-                mqtt=mqtt,
-                cloud_device=cloud_dev,
-                state_manager=state_manager
-            )
+            def _patched_apply(current, message):
+                import betterproto2
+                nav_msg_name = ""
+                res = betterproto2.which_one_of(message, "LubaSubMsg")
+                if res[0] == "nav":
+                    nav_msg_name = betterproto2.which_one_of(message.nav, "SubNavMsg")[0]
+                result = original_apply(current, message)
+                if nav_msg_name in ("toapp_work_report_ack", "toapp_work_report_upload"):
+                    r = result.work_session_result
+                    if r.start_work_time > 0:
+                        work_reports.append({
+                            'interrupt_flag': r.interrupt_flag,
+                            'start_work_time': r.start_work_time,
+                            'end_work_time': r.end_work_time,
+                            'work_time_used': r.work_time_used,
+                            'work_area': r.work_area,
+                            'work_progress': r.work_progress,
+                            'height_of_knife': r.height_of_knife,
+                            'work_type': r.work_type,
+                            'work_result': r.work_result,
+                        })
+                return result
 
-            # add our custom callback to capture work reports
-            state_manager.cloud_on_notification_callback.add_subscribers(capture_work_reports)
+            handle._reducer.apply = _patched_apply
 
-            mqtt.connect_async()
+            await self._client.send_command_with_args(args.device, "query_job_history")
+
             await asyncio.sleep(2)
 
-            # query if history is available
-            print("querying work history...")
-            await cloud_device.queue_command("query_job_history")
-            await asyncio.sleep(2)
+            await self._client.send_command_with_args(args.device, "request_job_history", num=args.count)
 
-            # request work history records
-            num_reports = args.count if args.count else 10
-            print(f"requesting {num_reports} work report(s)...")
-            await cloud_device.queue_command("request_job_history", num=num_reports)
+            # wait for records to arrive; poll until count reached or 10s with no new record
+            prev_count = 0
+            stale_polls = 0
+            for _ in range(120):  # up to 60s total
+                await asyncio.sleep(0.5)
+                cur_count = len(work_reports)
+                if cur_count >= args.count:
+                    break
+                if cur_count > prev_count:
+                    stale_polls = 0
+                    prev_count = cur_count
+                else:
+                    stale_polls += 1
+                    if stale_polls >= 20 and cur_count > 0:
+                        # 10s with no new record — device is done sending
+                        break
 
-            # wait for all reports to arrive (with timeout)
-            try:
-                await asyncio.wait_for(reports_received.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                logger.debug("timeout waiting for all reports")
+            handle._reducer.apply = original_apply  # restore
 
-            # give a bit more time for any stragglers
-            await asyncio.sleep(1)
-
-            # disconnect
-            mqtt.disconnect()
-
-            # Display the reports
             print(f"\nMowing History for {args.device}:")
             print("=" * 70)
 
@@ -1286,72 +863,73 @@ class MammotionClient:
                 print("The device may not have any completed mowing sessions yet.")
             else:
                 # sort by start time (newest first)
-                work_reports.sort(key=lambda r: r.start_work_time, reverse=True)
+                work_reports.sort(key=lambda r: r['start_work_time'], reverse=True)
+
+                # work type and result name maps
+                work_type_names = {
+                    0: "Unknown",
+                    1: "Mowing",
+                    2: "Border First",
+                    3: "Border Only",
+                    4: "Task Mode",
+                    8: "Manual Mode",
+                }
+                result_names = {
+                    0: "In Progress",
+                    1: "Failed",
+                    2: "Canceled",
+                    3: "Stopped",
+                    4: "Paused",
+                    5: "Completed",
+                }
 
                 for idx, report in enumerate(work_reports, 1):
                     print(f"\n[{idx}/{len(work_reports)}] Mowing Report:")
 
                     # timestamps
-                    if report.start_work_time > 0:
-                        start = datetime.fromtimestamp(report.start_work_time)
+                    if report['start_work_time'] > 0:
+                        start = datetime.fromtimestamp(report['start_work_time'])
                         print(f"  Started:     {start.strftime('%Y-%m-%d %H:%M:%S')}")
 
-                    if report.end_work_time > 0:
-                        end = datetime.fromtimestamp(report.end_work_time)
+                    if report['end_work_time'] > 0:
+                        end = datetime.fromtimestamp(report['end_work_time'])
                         print(f"  Ended:       {end.strftime('%Y-%m-%d %H:%M:%S')}")
 
                     # duration
-                    if report.work_time_used > 0:
-                        hours = report.work_time_used // 3600
-                        minutes = (report.work_time_used % 3600) // 60
+                    if report['work_time_used'] > 0:
+                        hours = report['work_time_used'] // 3600
+                        minutes = (report['work_time_used'] % 3600) // 60
                         print(f"  Duration:    {hours}h {minutes}m")
 
                     # area
-                    if report.work_ares > 0:
-                        sqft = report.work_ares * SQFT_PER_SQM
-                        print(f"  Area:        {report.work_ares:.1f} m² ({sqft:.0f} ft²)")
+                    if report['work_area'] > 0:
+                        sqft = report['work_area'] * SQFT_PER_SQM
+                        print(f"  Area:        {report['work_area']:.1f} m² ({sqft:.0f} ft²)")
 
                     # blade height
-                    if report.height_of_knife > 0:
-                        inches = report.height_of_knife / MM_PER_INCH
-                        print(f"  Blade:       {report.height_of_knife}mm ({inches:.1f}\")")
+                    if report['height_of_knife'] > 0:
+                        inches = report['height_of_knife'] / MM_PER_INCH
+                        print(f"  Blade:       {report['height_of_knife']}mm ({inches:.1f}\")")
 
                     # progress
-                    if report.work_progress > 0:
-                        print(f"  Progress:    {report.work_progress}%")
+                    if report['work_progress'] > 0:
+                        print(f"  Progress:    {report['work_progress']}%")
 
-                    # work type and result
-                    work_type_names = {
-                        0: "Unknown",
-                        1: "Mowing",
-                        2: "Border First",
-                        3: "Border Only",
-                        4: "Task Mode",
-                        8: "Manual Mode"
-                    }
-                    if report.work_type > 0:
-                        work_type_str = work_type_names.get(report.work_type, f"Type {report.work_type}")
-                        print(f"  Work Type:   {work_type_str}")
+                    # work type
+                    wt = report['work_type']
+                    if wt > 0:
+                        print(f"  Work Type:   {work_type_names.get(wt, f'Type {wt}')}")
 
                     # result status
-                    if report.interrupt_flag:
-                        print(f"  Result:      Interrupted")
+                    if report['interrupt_flag']:
+                        print("  Result:      Interrupted")
                     else:
-                        # work_result mappings based on observed data patterns
-                        result_names = {
-                            0: "In Progress",
-                            1: "Failed",
-                            2: "Canceled",
-                            3: "Stopped",      # incomplete, manually stopped or error
-                            4: "Paused",
-                            5: "Completed",    # successfully finished
-                        }
-                        result_str = result_names.get(report.work_result, f"Unknown ({report.work_result})")
-                        print(f"  Result:      {result_str}")
+                        wr = report['work_result']
+                        print(f"  Result:      {result_names.get(wr, f'Unknown ({wr})')}")
 
                     # verbose debug output
                     if args.verbose:
-                        print(f"  [DEBUG] work_type={report.work_type}, work_result={report.work_result}, job_content={report.job_content}")
+                        print(f"  [DEBUG] work_type={report['work_type']}, work_result={report['work_result']}")
 
                 print(f"\n{'=' * 70}")
                 print(f"Total: {len(work_reports)} mowing session(s)")
@@ -1361,7 +939,6 @@ class MammotionClient:
             print(f"failed to get mow reports: {e}")
 
     async def run(self, args) -> int:
-        """main run method."""
         try:
             # get credentials from env or args
             email = args.email or os.environ.get('MAMMOTION_EMAIL')
@@ -1376,26 +953,25 @@ class MammotionClient:
             if not await self.login(email, password, use_cache=use_cache):
                 return 1
 
+            # wait for MQTT transport to finish connecting before sending any commands
+            if not await self._wait_for_connection():
+                logger.warning("MQTT connection not ready after timeout — commands may fail")
+
             # get devices — if cached session is stale, retry with fresh login
             devices = await self.get_devices()
-            if devices is None and use_cache:
-                logger.debug("get_devices failed with cached session, retrying with fresh login")
+            if not devices and use_cache:
+                logger.debug("no devices with cached session, retrying with fresh login")
                 if not await self.login(email, password, use_cache=False):
                     return 1
                 devices = await self.get_devices()
-            if devices is None:
-                print("failed to get devices")
-                return 1
 
             # run command
             if hasattr(args, 'func'):
                 await args.func(args)
-                return 0
 
             return 0
         finally:
-            # always close session
-            await self.close()
+            await self.stop()
 
 
 def main():
@@ -1462,7 +1038,7 @@ def main():
     # reports command
     reports_parser = subparsers.add_parser('reports', help='get mowing job history reports')
     reports_parser.add_argument('--device', required=True, help='device name')
-    reports_parser.add_argument('--count', type=int, default=10, help='number of reports to retrieve (default: 10)')
+    reports_parser.add_argument('--count', type=int, default=5, help='number of reports to retrieve (default: 5)')
     reports_parser.add_argument('--verbose', '-v', action='store_true', help='show additional debugging information')
     reports_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_reports(args))
 
@@ -1472,10 +1048,8 @@ def main():
         parser.print_help()
         return 1
 
-    # create client and run
-    client = MammotionClient()
+    client = MammotionCLI()
 
-    # bind client to func
     if hasattr(args, 'func'):
         args.func = args.func(client)
 

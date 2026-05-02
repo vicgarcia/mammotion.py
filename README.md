@@ -13,7 +13,7 @@ A python CLI tool for controlling your Mammotion robotic automower built using t
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.14+
 - [uv](https://github.com/astral-sh/uv) package manager
 - A Mammotion account with registered devices
 
@@ -102,8 +102,8 @@ Or pass them as arguments: `-e you@example.com -p yourpass`
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--areas` | required | Area names to mow, space-separated, no quotes |
-| `--cutting-height` | 2.8 | Cutting height in inches (2.2-3.9) |
-| `--speed` | 0.5 | Mowing speed: 0.0 (slow) to 1.0 (fast) |
+| `--cutting-height` | 2.5 | Cutting height in inches (2.2-3.9) |
+| `--speed` | 0.25 | Mowing speed: 0.0 (slow) to 1.0 (fast) |
 | `--perimeter-laps` | 2 | Number of border laps (0-4) |
 | `--mow-order` | grid-first | `grid-first` or `perimeter-first` |
 | `--pattern` | zigzag | `zigzag`, `chessboard`, `perimeter`, or `adaptive` |

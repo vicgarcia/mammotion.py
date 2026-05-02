@@ -63,12 +63,12 @@ mammotion.py start --device Luba-XXXXXX \
 |--------|---------|--------------|-------------|
 | `--areas` | required | area names | Area names to mow, space-separated, no quotes |
 | `--pattern` | zigzag | zigzag, chessboard, perimeter, adaptive | Mowing path pattern |
-| `--cutting-height` | 2.8 | 2.2-3.9 inches | Blade cutting height |
+| `--cutting-height` | 2.5 | 2.2-3.9 inches | Blade cutting height |
 | `--path-spacing` | 10.0 | 7.9-13.8 inches | Distance between mowing passes |
 | `--perimeter-laps` | 2 | 0-4 | Number of border passes |
 | `--mow-order` | grid-first | grid-first, perimeter-first | Order of operations |
 | `--mowing-angle` | 0 | 0-359 degrees | Direction of mowing lines |
-| `--speed` | 0.5 | 0.0-1.0 | Mowing speed (0=slow, 1=fast) |
+| `--speed` | 0.25 | 0.0-1.0 | Mowing speed (0=slow, 1=fast) |
 
 ### Control Commands
 ```bash
