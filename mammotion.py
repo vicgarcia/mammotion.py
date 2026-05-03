@@ -699,7 +699,7 @@ class MammotionCLI:
             print("\nNo areas found.")
             print("Try running again or check if map exists in the app.")
 
-    async def cmd_schedules(self, args) -> None:
+    async def cmd_schedule(self, args) -> None:
         if not self.check_not_rtk(args.device):
             return
 
@@ -795,8 +795,8 @@ class MammotionCLI:
                 print(f"Total: {len(plans)} scheduled task(s)")
 
         except Exception as e:
-            logger.exception("schedules command error")
-            print(f"failed to get schedules: {e}")
+            logger.exception("schedule command error")
+            print(f"failed to get schedule: {e}")
 
     async def cmd_reports(self, args) -> None:
         if not self.check_not_rtk(args.device):
@@ -1044,11 +1044,11 @@ def main():
     areas_parser.add_argument('--device', required=True, help='device name')
     areas_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_areas(args))
 
-    # schedules command
-    schedules_parser = subparsers.add_parser('schedules', help='list scheduled mowing tasks')
+    # schedule command
+    schedules_parser = subparsers.add_parser('schedule', help='list scheduled mowing tasks')
     schedules_parser.add_argument('--device', required=True, help='device name')
     schedules_parser.add_argument('--verbose', '-v', action='store_true', help='show additional debugging information')
-    schedules_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_schedules(args))
+    schedules_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_schedule(args))
 
     # reports command
     reports_parser = subparsers.add_parser('reports', help='get mowing job history reports')
