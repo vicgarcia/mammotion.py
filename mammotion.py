@@ -196,7 +196,13 @@ class MammotionCLI:
             return False
 
     async def _wait_for_connection(self, timeout: float = 12.0) -> bool:
-        """Wait until at least one MQTT transport is connected."""
+        """Wait until at least one MQTT transport is connected and ready.
+
+        The library sets is_connected=True on CONNACK, but topic subscriptions
+        and the Aliyun bind message are sent afterward. Without the bind, device
+        responses are not routed back to our client by the broker. We wait an
+        extra 2s after the CONNACK to allow subscriptions and bind to complete.
+        """
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             session = self._client._get_default_session()
@@ -204,6 +210,7 @@ class MammotionCLI:
                 al = session.aliyun_transport
                 mm = session.mammotion_transport
                 if (al and al.is_connected) or (mm and mm.is_connected):
+                    await asyncio.sleep(2.0)
                     return True
             await asyncio.sleep(0.25)
         return False
@@ -342,7 +349,7 @@ class MammotionCLI:
     # === command handlers ===
 
     async def cmd_devices(self, args) -> None:
-        devices = self.devices
+        devices = await self.get_devices()
 
         print("\nDevices:")
         print("=" * 70)
@@ -690,7 +697,7 @@ class MammotionCLI:
         if not self.check_not_rtk(args.device):
             return
 
-        if not self.find_device(args.device):
+        if not self._client.mower(args.device):
             print(f"device not found: {args.device}")
             return
 
@@ -789,7 +796,7 @@ class MammotionCLI:
         if not self.check_not_rtk(args.device):
             return
 
-        if not self.find_device(args.device):
+        if not self._client.mower(args.device):
             print(f"device not found: {args.device}")
             return
 
@@ -955,15 +962,17 @@ class MammotionCLI:
 
             # wait for MQTT transport to finish connecting before sending any commands
             if not await self._wait_for_connection():
-                logger.warning("MQTT connection not ready after timeout — commands may fail")
-
-            # get devices — if cached session is stale, retry with fresh login
-            devices = await self.get_devices()
-            if not devices and use_cache:
-                logger.debug("no devices with cached session, retrying with fresh login")
-                if not await self.login(email, password, use_cache=False):
+                if use_cache:
+                    # transport failed to connect — cached credentials are likely stale
+                    AUTH_CACHE_FILE.unlink(missing_ok=True)
+                    if not await self.login(email, password, use_cache=False):
+                        return 1
+                    if not await self._wait_for_connection():
+                        print("error: failed to connect to Mammotion cloud")
+                        return 1
+                else:
+                    print("error: failed to connect to Mammotion cloud")
                     return 1
-                devices = await self.get_devices()
 
             # run command
             if hasattr(args, 'func'):
