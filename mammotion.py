@@ -117,7 +117,7 @@ class MammotionCLI:
     """CLI wrapper around the PyMammotion client."""
 
     def __init__(self):
-        self._client: MammotionClient = MammotionClient('0.5.31')
+        self._client: MammotionClient = MammotionClient()
         self.devices: list[dict[str, Any]] = []
 
     # === helpers ===
@@ -182,6 +182,8 @@ class MammotionCLI:
             if cache:
                 try:
                     await self._client.restore_credentials(email, password, cache)
+                    # save in case the library refreshed tokens internally (e.g. 2401)
+                    self._save_cache()
                     return True
                 except Exception as e:
                     logger.debug("cache restore failed: %s", e)
@@ -265,12 +267,16 @@ class MammotionCLI:
         try:
             await self._client.send_command_with_args(device_name, "get_report_cfg")
 
-            # poll until we get a non-default status (up to ~8s)
-            for _ in range(8):
+            # poll until we get a non-default status (up to ~12s).
+            # re-send after 3s in case the first send was dropped (MQTT bind
+            # may not have completed when the first command was sent).
+            for i in range(12):
                 await asyncio.sleep(1)
                 device = self._client.get_device_by_name(device_name)
                 if device and device.report_data.dev.sys_status != 0:
                     break
+                if i == 2:
+                    await self._client.send_command_with_args(device_name, "get_report_cfg")
 
             device = self._client.get_device_by_name(device_name)
             if not device:
