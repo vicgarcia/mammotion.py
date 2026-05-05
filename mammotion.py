@@ -21,7 +21,6 @@ import orjson
 from pymammotion.client import MammotionClient
 from pymammotion.utility.device_type import DeviceType
 from pymammotion.data.model.generate_route_information import GenerateRouteInformation
-from pymammotion.messaging.mow_path_saga import MowPathSaga
 
 # setup logging
 logging.basicConfig(level=logging.WARNING)
@@ -547,64 +546,21 @@ class MammotionCLI:
         )
 
         try:
-            # start_mow_path_saga (and send_command_with_args) just enqueue work and return
-            # immediately — the queue processor runs them asynchronously. if we return from
-            # cmd_start before they execute, stop() cancels the queue and neither runs.
-            # fix: build the saga ourselves, send start_job inside on_complete (which runs
-            # after the saga finishes), and await an event so we don't return until done.
-
-            handle = self._client.mower(args.device)
-            if not handle:
-                print(f"device not found: {args.device}")
-                return
-
-            _iot_id = handle.iot_id
-
-            async def _send_cmd(cmd: bytes) -> None:
-                await handle.active_transport().send(cmd, iot_id=_iot_id)
-
-            saga = MowPathSaga(
-                command_builder=handle.commands,
-                send_command=_send_cmd,
-                get_map=lambda: handle.snapshot.raw.map,
-                zone_hashs=area_hashes,
-                route_info=route_info,
-                device_name=args.device,
+            # send generate_route_information and wait for the device to confirm the route plan.
+            # MowPathSaga skips this step when route_info is passed (treating it as "already sent"),
+            # so we send it directly here to ensure the device receives the route configuration.
+            print("planning route...")
+            await self._client.send_command_and_wait(
+                args.device,
+                "generate_route_information",
+                "bidire_reqconver_path",
+                send_timeout=30.0,
+                generate_route_information=route_info,
             )
 
-            saga_done = asyncio.Event()
-            saga_failed = asyncio.Event()
-
-            # override execute() so the done/failed events are always set,
-            # even when the saga raises — on_complete is only called on success
-            original_execute = saga.execute
-
-            async def _execute_with_signal(broker):
-                try:
-                    await original_execute(broker)
-                except Exception:
-                    saga_failed.set()
-                    saga_done.set()
-                    raise
-
-            saga.execute = _execute_with_signal
-
-            async def _on_complete():
-                # exclusive lock is released before on_complete runs; send start_job directly
-                await _send_cmd(handle.commands.start_job())
-                saga_done.set()
-
-            await handle.enqueue_saga(saga, on_complete=_on_complete)
-
-            # wait for the saga + start_job to actually execute (up to 90s for route planning)
-            try:
-                await asyncio.wait_for(saga_done.wait(), timeout=90.0)
-                if saga_failed.is_set():
-                    print("route planning failed — check device is ready and has a valid map")
-                else:
-                    print(f"started mowing task on {args.device}")
-            except asyncio.TimeoutError:
-                print("route planning timed out — mowing task may not have started")
+            await self._client.send_command_with_args(args.device, "start_job")
+            await asyncio.sleep(1)  # let the event loop deliver start_job before CLI exits
+            print(f"started mowing task on {args.device}")
 
         except Exception as e:
             logger.exception("start command error")

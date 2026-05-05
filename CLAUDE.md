@@ -94,10 +94,12 @@ Do **not** add `set_blade_control(on_off=1)` or `operate_on_device(...)` after `
 
 ### Command flow for `start`
 
-1. `get_area_list()` — syncs map via `start_map_sync` saga, gets area names/hashes
-2. `start_mow_path_saga(device, area_hashes, route_info)` — plans the route
+1. `get_area_list()` — fetches area names/hashes via `get_area_name_list`
+2. `send_command_and_wait(device, "generate_route_information", "bidire_reqconver_path", ...)` — sends route config and waits for device confirmation
 3. `send_command_with_args(device, "start_job")` — begins execution
 4. Device runs autonomously from this point
+
+**Do NOT use `MowPathSaga` for starting mowing.** When `route_info` is passed to `MowPathSaga.__init__`, it sets `_route_val = route_info`, causing step 2 of the saga (send `generate_route_information`) to be skipped entirely on the first run. The device never receives the route configuration, so `start_job` silently does nothing. Send `generate_route_information` directly via `send_command_and_wait` instead.
 
 ### Command flow for pause/resume/return/cancel
 
