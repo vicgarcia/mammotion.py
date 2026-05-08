@@ -10,6 +10,12 @@ Single-file PEP 723 script (`uv run --script`). Requires **Python 3.14** (specif
 
 ### Communication layer
 
+The client must be instantiated with `ha_version` to send the `HA,2.X` `App-Version` header. Without it, the header is `ALIYUN DEMO,...` which Mammotion's server rejects with 403 "Access denied":
+
+```python
+self._client = MammotionClient(ha_version="0.5.7")
+```
+
 All device commands go through the persistent `PyMammotionClient` instance:
 
 ```python

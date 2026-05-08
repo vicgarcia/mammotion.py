@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
-#     "pymammotion>=0.7.90",
+#     "pymammotion>=0.7.99",
 # ]
 # ///
 
@@ -116,7 +116,7 @@ class MammotionCLI:
     """CLI wrapper around the PyMammotion client."""
 
     def __init__(self):
-        self._client: MammotionClient = MammotionClient()
+        self._client: MammotionClient = MammotionClient(ha_version="0.5.7")
         self.devices: list[dict[str, Any]] = []
 
     # === helpers ===
