@@ -822,8 +822,9 @@ class MammotionCLI:
 
             handle._reducer.apply = original_apply  # restore
 
-            print(f"\nMowing History for {args.device}:")
-            print("=" * 70)
+            if not args.content_only:
+                print(f"\nMowing History for {args.device}:")
+                print("=" * 70)
 
             if not work_reports:
                 print("\nNo mowing reports available.")
@@ -898,7 +899,8 @@ class MammotionCLI:
                     if args.verbose:
                         print(f"  [DEBUG] work_type={report['work_type']}, work_result={report['work_result']}")
 
-                print(f"\n{'=' * 70}")
+                if not args.content_only:
+                    print(f"\n{'=' * 70}")
 
         except Exception as e:
             logger.exception("reports command error")
@@ -1008,6 +1010,7 @@ def main():
     reports_parser.add_argument('--device', required=True, help='device name')
     reports_parser.add_argument('--count', type=int, default=5, help='number of reports to retrieve (default: 5)')
     reports_parser.add_argument('--verbose', '-v', action='store_true', help='show additional debugging information')
+    reports_parser.add_argument('--content-only', action='store_true', help='omit header and divider bars')
     reports_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_reports(args))
 
     args = parser.parse_args()
