@@ -356,8 +356,9 @@ class MammotionCLI:
     async def cmd_devices(self, args) -> None:
         devices = await self.get_devices()
 
-        print("\nDevices:")
+        print("\nMammotion Devices:")
         print("=" * 70)
+        print()
 
         if not devices:
             print("\nNo devices found.")
@@ -377,14 +378,11 @@ class MammotionCLI:
                     print(f"    {dev['device_name']}")
 
             print(f"\n{'=' * 70}")
-            summary = f"Total: {len(devices)} device(s)"
-            if shared:
-                summary += f" ({len(owned)} owned, {len(shared)} shared)"
-            print(summary)
 
     async def cmd_status(self, args) -> None:
         print(f"\nStatus for {args.device}:")
         print("=" * 70)
+        print()
 
         if self.is_rtk_device(args.device):
             # RTK base station — look up from device list, no MQTT state query needed
@@ -446,6 +444,7 @@ class MammotionCLI:
                 miles = state['mileage'] * METERS_TO_MILES
                 print(f"  Total mileage: {miles:.1f} miles")
 
+        print()
         print("=" * 70)
 
     async def cmd_start(self, args) -> None:
@@ -645,15 +644,15 @@ class MammotionCLI:
 
         print(f"\nAreas for {args.device}:")
         print("=" * 70)
+        print()
 
         if areas:
             for area in areas:
                 print(f"  {area.name} (hash: {area.hash})")
             print(f"\n{'=' * 70}")
-            print(f"Total: {len(areas)} area(s)")
         else:
-            print("\nNo areas found.")
-            print("Try running again or check if map exists in the app.")
+            print("  No areas found.")
+            print("  Try running again or check if map exists in the app.")
 
     async def cmd_schedule(self, args) -> None:
         if not self.check_not_rtk(args.device):
@@ -704,7 +703,7 @@ class MammotionCLI:
                 pattern_names = {0: "zigzag", 1: "chessboard", 2: "adaptive", 3: "perimeter"}
 
                 for idx, (plan_id, plan) in enumerate(plans.items(), 1):
-                    print(f"\n[{idx}/{len(plans)}] Schedule: {plan.task_name or plan.job_name or plan_id}")
+                    print(f"\n  [{idx}/{len(plans)}] Schedule: {plan.task_name or plan.job_name or plan_id}")
 
                     if plan.start_time:
                         print(f"  Start time:  {plan.start_time}")
@@ -748,7 +747,6 @@ class MammotionCLI:
                         print(f"  [DEBUG] work_time={plan.work_time}, required_time={plan.required_time}, area={plan.area}")
 
                 print(f"\n{'=' * 70}")
-                print(f"Total: {len(plans)} scheduled task(s)")
 
         except Exception as e:
             logger.exception("schedule command error")
@@ -853,7 +851,7 @@ class MammotionCLI:
                 }
 
                 for idx, report in enumerate(work_reports, 1):
-                    print(f"\n[{idx}/{len(work_reports)}] Mowing Report:")
+                    print(f"\n  [{idx}/{len(work_reports)}] Mowing Report:")
 
                     # timestamps
                     if report['start_work_time'] > 0:
@@ -901,7 +899,6 @@ class MammotionCLI:
                         print(f"  [DEBUG] work_type={report['work_type']}, work_result={report['work_result']}")
 
                 print(f"\n{'=' * 70}")
-                print(f"Total: {len(work_reports)} mowing session(s)")
 
         except Exception as e:
             logger.exception("reports command error")
