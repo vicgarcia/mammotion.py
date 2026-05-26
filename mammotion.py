@@ -831,11 +831,18 @@ class MammotionCLI:
                 print("=" * 70)
 
             if not work_reports:
-                print("\nNo mowing reports available.")
-                print("The device may not have any completed mowing sessions yet.")
+                print("\nNo mowing reports available")
             else:
                 # sort by start time (newest first)
                 work_reports.sort(key=lambda r: r['start_work_time'], reverse=True)
+
+                if args.today_only:
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    work_reports = [
+                        r for r in work_reports
+                        if r['start_work_time'] > 0
+                        and datetime.fromtimestamp(r['start_work_time']).strftime("%Y-%m-%d") == today
+                    ]
 
                 # work type and result name maps
                 work_type_names = {
@@ -1012,9 +1019,10 @@ def main():
     # reports command
     reports_parser = subparsers.add_parser('reports', help='get mowing job history reports')
     reports_parser.add_argument('--device', required=True, help='device name')
-    reports_parser.add_argument('--count', type=int, default=5, help='number of reports to retrieve (default: 5)')
+    reports_parser.add_argument('--count', type=int, default=10, help='number of reports to retrieve (default: 10)')
     reports_parser.add_argument('--verbose', '-v', action='store_true', help='show additional debugging information')
     reports_parser.add_argument('--content-only', action='store_true', help='omit header and divider bars')
+    reports_parser.add_argument('--today-only', action='store_true', help='filter output to reports from today only')
     reports_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_reports(args))
 
     args = parser.parse_args()
