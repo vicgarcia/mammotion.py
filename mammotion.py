@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 for _noisy in ["mqtt", "paho", "paho.mqtt", "aiomqtt", "asyncio"]:
     logging.getLogger(_noisy).setLevel(logging.CRITICAL)
 
+# silence token-refresh noise from pymammotion internals
+for _noisy in ["pymammotion.client", "pymammotion.aliyun", "pymammotion.messaging.command_queue"]:
+    logging.getLogger(_noisy).setLevel(logging.CRITICAL)
+
 # conversion constants
 MM_PER_INCH = 25.4
 CM_PER_INCH = 2.54
