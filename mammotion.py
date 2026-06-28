@@ -2,7 +2,8 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
-#     "pymammotion>=0.7.99",
+#     "pymammotion>=0.8.8",
+#     "packaging",
 # ]
 # ///
 
@@ -268,7 +269,7 @@ class MammotionCLI:
     async def get_device_state(self, device_name: str) -> dict[str, Any] | None:
         """get current device state via MQTT."""
         try:
-            await self._client.send_command_with_args(device_name, "get_report_cfg")
+            await self._client.request_report_snapshot(device_name)
 
             # poll until we get a non-default status (up to ~12s).
             # re-send after 3s in case the first send was dropped (MQTT bind
@@ -279,7 +280,7 @@ class MammotionCLI:
                 if device and device.report_data.dev.sys_status != 0:
                     break
                 if i == 2:
-                    await self._client.send_command_with_args(device_name, "get_report_cfg")
+                    await self._client.request_report_snapshot(device_name)
 
             device = self._client.get_device_by_name(device_name)
             if not device:
@@ -541,6 +542,7 @@ class MammotionCLI:
             channel_mode=channel_mode,
             channel_width=path_spacing_cm,
             edge_mode=args.perimeter_laps,
+            obstacle_laps=1,
             job_mode=4,
             toward=args.mowing_angle,
             toward_included_angle=0,

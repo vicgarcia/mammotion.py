@@ -93,8 +93,8 @@ Lists all defined mowing zones with their names and hashes. Areas are created in
 
 ### View Schedules
 ```bash
-mammotion.py schedules --device Luba-XXXXXX
-mammotion.py schedules --device Luba-XXXXXX --verbose  # debug info
+mammotion.py schedule --device Luba-XXXXXX
+mammotion.py schedule --device Luba-XXXXXX --verbose  # debug info
 ```
 Shows scheduled mowing tasks with times, days, areas, and settings.
 

@@ -45,7 +45,7 @@ chmod +x ~/.local/bin/mammotion.py
 | `return` | Return to charging dock |
 | `cancel` | Cancel current job |
 | `areas` | List all mowing areas/zones |
-| `schedules` | List scheduled mowing tasks |
+| `schedule` | List scheduled mowing tasks |
 | `reports` | Show mowing job history |
 
 ## Usage
@@ -93,7 +93,7 @@ Or pass them as arguments: `-e you@example.com -p yourpass`
 ### View areas and schedules
 ```bash
 ./mammotion.py areas --device Luba-ABC123
-./mammotion.py schedules --device Luba-ABC123
+./mammotion.py schedule --device Luba-ABC123
 ./mammotion.py reports --device Luba-ABC123
 ```
 

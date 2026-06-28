@@ -6,7 +6,7 @@ Single-file PEP 723 script (`uv run --script`). Requires **Python 3.14** (specif
 
 ### PyMammotion library version
 
-`pymammotion>=0.7.90` — this was a **major architectural rewrite** from the 0.5.x/0.7.0 era. The old `MammotionBaseCloudDevice`, `MammotionCloud`, and `AliyunMQTT` classes are gone. Do not attempt to use them.
+`pymammotion>=0.8.8` — this was a **major architectural rewrite** from the 0.5.x/0.7.0 era. The old `MammotionBaseCloudDevice`, `MammotionCloud`, and `AliyunMQTT` classes are gone. Do not attempt to use them.
 
 ### Communication layer
 
