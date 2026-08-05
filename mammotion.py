@@ -301,6 +301,7 @@ class MammotionCLI:
             return {
                 'status': device.report_data.dev.sys_status,
                 'status_name': MammotionWorkMode.display_for(device.report_data.dev.sys_status),
+                'docked': device.report_data.dev.charge_state != 0,
                 'battery': device.report_data.dev.battery_val,
                 'progress': area_raw >> 16,
                 'total_time_min': progress_raw & 65535,
@@ -415,6 +416,7 @@ class MammotionCLI:
                 return
 
             print(f"  Status: {state['status_name']}")
+            print(f"  Docked: {'yes' if state['docked'] else 'no'}")
             print(f"  Battery: {state['battery']}%")
 
             if state['status'] in (

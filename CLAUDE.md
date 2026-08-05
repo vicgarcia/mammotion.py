@@ -98,6 +98,12 @@ Do **not** add `set_blade_control(on_off=1)` or `operate_on_device(...)` after `
 | 19 | PAUSE | Job paused |
 | 20 | MANUAL_MOWING | Manual/joystick control |
 
+### Docked indicator (charge_state)
+
+`device.report_data.dev.charge_state` (proto `rpt_dev_status.charge_state`) is a separate field from `sys_status` — nonzero whenever the mower is physically on the dock, regardless of `sys_status`. It's more reliable than inferring "docked" from `status_name`: once the battery hits 100%, `sys_status` can read READY/ONLINE while the mower is still sitting on the dock, whereas `charge_state` stays nonzero the whole time. This is the same signal pymammotion's own `handle.py` `device_mode()` uses to distinguish `DOCKED_FULL`/`DOCKED_CHARGING` from `ACTIVE`/`IDLE`.
+
+`get_device_state()` exposes this as `docked: bool`, and `cmd_status` prints it as a `Docked: yes/no` line.
+
 ### Command flow for `start`
 
 1. `get_area_list()` — fetches area names/hashes via `get_area_name_list`
