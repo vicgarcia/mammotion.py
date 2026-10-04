@@ -6,14 +6,13 @@ All CLI logic lives in the single-file PEP 723 script `mammotion.py`; Python **3
 
 Inline dependencies are exact: **`pymammotion==0.10.7`**, **`orjson==3.12.0`**, **`betterproto2==0.10.0`**. **`packaging==26.3`** is also required explicitly: PyMammotion imports `packaging.version` in `transport/cloud.py` but omits it from its published dependencies. A clean environment fails without it. Private API assumptions below are tied to this pinned upstream version; review them on upgrades.
 
-Maintain and execute the script lock with:
+Run the script without a lockfile:
 
 ```bash
-uv lock --script mammotion.py --upgrade
-uv run --locked --script mammotion.py --help
+uv run --script mammotion.py --help
 ```
 
-Commit `mammotion.py.lock` alongside dependency changes. `--upgrade` re-resolves within exact inline constraints, not beyond them. A standalone installed copy must have **adjacent `mammotion.py.lock`**; copy both files and use `uv run --locked --script /path/to/mammotion.py ...`. The executable shebang includes `--locked` too.
+For upgrades, explicitly edit the exact inline pins and run `uv run --refresh --script mammotion.py --help`, followed by offline tests. Direct pins remain fixed; transitive versions may change on fresh resolution. A standalone installation needs only `mammotion.py`, invoked through its uv shebang or `uv run --script /path/to/mammotion.py ...`.
 
 Global pi skill: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
@@ -91,4 +90,4 @@ Selected `sys_status` values: READY=11, WORKING=13, RETURNING=14, CHARGING=15, P
 
 The CLI cannot guarantee safety. Cloud pause/cancel/return are ordinary remote requests, never an emergency stop; return may move the mower. Network delay, account contention and confirmation failure can make outcomes uncertain. Use the **physical STOP button** in an emergency. Do not blindly retry an unconfirmed start or resume: inspect fresh state and the physical mower first.
 
-An unresolved IDE import can reflect uv's isolated script environment. Resolve imports against the locked environment rather than weakening pins or adding unrelated dependencies.
+An unresolved IDE import can reflect uv's isolated script environment. Resolve imports against uv's script environment rather than weakening pins or adding unrelated dependencies.

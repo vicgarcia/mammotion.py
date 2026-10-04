@@ -1,14 +1,14 @@
 ---
 name: mammotion
 description: Control Mammotion robotic mowers via cloud API, inspect status, areas, schedules and history. Autonomous start is limited to caller-verified Luba 2 / Pro H variants; cloud actions are not emergency stops.
-compatibility: Requires Python 3.14+, uv, mammotion.py with adjacent mammotion.py.lock, and MAMMOTION_EMAIL/MAMMOTION_PASSWORD environment variables.
+compatibility: Requires Python 3.14+, uv, mammotion.py, and MAMMOTION_EMAIL/MAMMOTION_PASSWORD environment variables.
 ---
 
 # Mammotion Robotic Mower Control
 
 Global skill location: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
-Use the single-file CLI with PyMammotion **0.10.7**, explicit `orjson==3.12.0` and `betterproto2==0.10.0`, and its script lockfile. `packaging==26.3` is explicit because PyMammotion imports it without declaring it.
+Use the single-file CLI with PyMammotion **0.10.7**, explicit `orjson==3.12.0` and `betterproto2==0.10.0`, with pinned direct dependencies and no required lockfile. `packaging==26.3` is explicit because PyMammotion imports it without declaring it.
 
 ## Safety and capability boundaries
 
@@ -20,23 +20,23 @@ Use the single-file CLI with PyMammotion **0.10.7**, explicit `orjson==3.12.0` a
 - **RTK:** listing and metadata-only status (cloud online/offline and product info), not mower telemetry or mower actions.
 - Actions use `Priority.USER` and wait for state confirmation. A send/acknowledgement alone does not prove execution. An unconfirmed outcome may still have moved the mower: fetch fresh status before retrying; do not blindly repeat a start.
 
-## Locked execution and authentication
+## Execution and authentication
 
 Prefer an explicit script path. For the standalone installation:
 
 ```bash
-uv run --locked --script ~/.local/bin/mammotion.py devices
+uv run --script ~/.local/bin/mammotion.py devices
 ```
 
-Every example below assumes the repository working directory; replace `mammotion.py` with the installed path as needed. The standalone script requires **adjacent `mammotion.py.lock`**. Do not bypass `--locked` or silently re-resolve dependencies.
+Every example below assumes the repository working directory; replace `mammotion.py` with the installed path as needed. No adjacent lockfile is required.
 
-For deliberate dependency maintenance only:
+For deliberate dependency maintenance, edit the exact inline pins and test a refreshed environment:
 
 ```bash
-uv lock --script mammotion.py --upgrade
+uv run --refresh --script mammotion.py --help
 ```
 
-Review the resulting lockfile; exact inline pins do not upgrade themselves. Copy both script and lockfile when updating a standalone installation.
+Exact inline pins do not upgrade themselves. Transitive versions may change on fresh resolution. Copy the script when updating a standalone installation.
 
 Credentials come from `MAMMOTION_EMAIL` and `MAMMOTION_PASSWORD`, or global `-e EMAIL -p PASSWORD` arguments. Prefer environment variables; never expose passwords or the sensitive `~/.mammotion.json` cache in logs/responses.
 
@@ -49,9 +49,9 @@ Mobile apps and other integrations share cloud account/session resources. Concur
 ### Inspect before acting
 
 ```bash
-uv run --locked --script mammotion.py devices
-uv run --locked --script mammotion.py status --device Luba-XXXXXX
-uv run --locked --script mammotion.py areas --device Luba-XXXXXX
+uv run --script mammotion.py devices
+uv run --script mammotion.py status --device Luba-XXXXXX
+uv run --script mammotion.py areas --device Luba-XXXXXX
 ```
 
 Mower status requests fresh telemetry: state, battery, docked indicator, progress, position, height and RTK information where available. A timeout is not valid fresh status. Zone names/hashes come from the mower; zones are created in the mobile app.
@@ -59,7 +59,7 @@ Mower status requests fresh telemetry: state, battery, docked indicator, progres
 ### Start (caller-verified H variant only)
 
 ```bash
-uv run --locked --script mammotion.py start --device Luba-XXXXXX \
+uv run --script mammotion.py start --device Luba-XXXXXX \
   --areas front-yard --pattern chessboard --cutting-height 2.5 \
   --path-spacing 10.0 --perimeter-laps 2 --mow-order grid-first \
   --mowing-angle 45 --speed 0.25
@@ -81,10 +81,10 @@ Zigzag is a single-pass line pattern; chessboard uses perpendicular passes with 
 ### Ordinary remote actions
 
 ```bash
-uv run --locked --script mammotion.py pause --device Luba-XXXXXX
-uv run --locked --script mammotion.py resume --device Luba-XXXXXX
-uv run --locked --script mammotion.py return --device Luba-XXXXXX
-uv run --locked --script mammotion.py cancel --device Luba-XXXXXX
+uv run --script mammotion.py pause --device Luba-XXXXXX
+uv run --script mammotion.py resume --device Luba-XXXXXX
+uv run --script mammotion.py return --device Luba-XXXXXX
+uv run --script mammotion.py cancel --device Luba-XXXXXX
 ```
 
 These check state preconditions and confirm the resulting state. Cloud connectivity or confirmation can fail; none is a safety-rated stop.
@@ -92,8 +92,8 @@ These check state preconditions and confirm the resulting state. Cloud connectiv
 ### Schedules and history
 
 ```bash
-uv run --locked --script mammotion.py schedule --device Luba-XXXXXX
-uv run --locked --script mammotion.py reports --device Luba-XXXXXX --count 20
+uv run --script mammotion.py schedule --device Luba-XXXXXX
+uv run --script mammotion.py reports --device Luba-XXXXXX --count 20
 ```
 
 Schedules list task settings; reports show session history. Neither establishes current mower readiness.

@@ -6,31 +6,31 @@ Single-file Python CLI for Mammotion cloud devices, built on [PyMammotion](https
 
 - Python 3.14+, [uv](https://github.com/astral-sh/uv), and a Mammotion account with registered devices.
 - Inline dependencies: `pymammotion==0.10.7`, `orjson==3.12.0`, `betterproto2==0.10.0`. Also `packaging==26.3`: PyMammotion imports it but omits it from its dependency metadata.
-- `mammotion.py.lock` locks the script environment, including transitive dependencies.
+- Direct dependencies remain pinned; uv resolves transitive dependencies without a lockfile.
 
 ```bash
 git clone https://github.com/vicgarcia/mammotion.py.git
 cd mammotion.py
-uv run --locked --script mammotion.py --help
+uv run --script mammotion.py --help
 ```
 
-Maintainers regenerate the script lock after dependency changes with:
+To update direct dependencies, explicitly edit the inline pins, then refresh and test:
 
 ```bash
-uv lock --script mammotion.py --upgrade
+uv run --refresh --script mammotion.py --help
 ```
 
-Review and commit both the inline dependency changes and `mammotion.py.lock`. Exact pins remain fixed until explicitly edited; `--upgrade` re-resolves within those constraints.
+Review dependency changes before committing. Transitive versions may change on fresh resolution.
 
-For a standalone installation, copy **both files** together:
+For a standalone installation, copy the script:
 
 ```bash
 mkdir -p ~/.local/bin
-cp mammotion.py mammotion.py.lock ~/.local/bin/
-uv run --locked --script ~/.local/bin/mammotion.py --help
+cp mammotion.py ~/.local/bin/
+uv run --script ~/.local/bin/mammotion.py --help
 ```
 
-The installed script needs its adjacent `mammotion.py.lock`. Its executable shebang also enforces `--locked`; run `chmod +x ~/.local/bin/mammotion.py` to invoke it directly as `mammotion.py`.
+No lockfile is required. Run `chmod +x ~/.local/bin/mammotion.py` to invoke it directly as `mammotion.py`.
 
 ## Safety and model limits
 
@@ -58,14 +58,14 @@ The CLI and mobile app/other integrations share cloud account/session resources.
 
 ## Commands
 
-All examples use locked execution:
+All examples use uv script execution:
 
 ```bash
-uv run --locked --script mammotion.py devices
-uv run --locked --script mammotion.py status --device Luba-ABC123
-uv run --locked --script mammotion.py areas --device Luba-ABC123
-uv run --locked --script mammotion.py schedule --device Luba-ABC123
-uv run --locked --script mammotion.py reports --device Luba-ABC123 --count 20
+uv run --script mammotion.py devices
+uv run --script mammotion.py status --device Luba-ABC123
+uv run --script mammotion.py areas --device Luba-ABC123
+uv run --script mammotion.py schedule --device Luba-ABC123
+uv run --script mammotion.py reports --device Luba-ABC123 --count 20
 ```
 
 | Command | Description |
@@ -88,8 +88,8 @@ Commands requiring mower communication wait for **the selected device's transpor
 Use these examples only after verifying the selected device is a supported H model:
 
 ```bash
-uv run --locked --script mammotion.py start --device Luba-ABC123 --areas front-yard back-yard
-uv run --locked --script mammotion.py start --device Luba-ABC123 --areas front-yard \
+uv run --script mammotion.py start --device Luba-ABC123 --areas front-yard back-yard
+uv run --script mammotion.py start --device Luba-ABC123 --areas front-yard \
   --cutting-height 2.5 --speed 0.7 --perimeter-laps 2 \
   --mow-order perimeter-first --pattern chessboard
 ```
@@ -110,16 +110,16 @@ Route configuration uses upstream `OperationSettings` / `build_route_information
 ### Remote actions (not emergency stops)
 
 ```bash
-uv run --locked --script mammotion.py pause --device Luba-ABC123
-uv run --locked --script mammotion.py resume --device Luba-ABC123
-uv run --locked --script mammotion.py return --device Luba-ABC123
-uv run --locked --script mammotion.py cancel --device Luba-ABC123
+uv run --script mammotion.py pause --device Luba-ABC123
+uv run --script mammotion.py resume --device Luba-ABC123
+uv run --script mammotion.py return --device Luba-ABC123
+uv run --script mammotion.py cancel --device Luba-ABC123
 ```
 
 ## Offline regression tests
 
 ```bash
-uv run --locked --script mammotion.py --help
+uv run --script mammotion.py --help
 uv run --no-project --python 3.14 --with pymammotion==0.10.7 --with orjson==3.12.0 --with betterproto2==0.10.0 --with packaging==26.3 \
   python -m unittest discover -s tests -v
 ```
@@ -135,4 +135,4 @@ mkdir -p ~/.pi/agent/skills/mammotion
 cp SKILL.md ~/.pi/agent/skills/mammotion/SKILL.md
 ```
 
-Keep the installed script and adjacent lockfile together, and set credentials in the agent's environment. The skill describes model restrictions, locked command execution, status confirmation, and physical-stop safety limits.
+Set credentials in the agent's environment. The skill describes model restrictions, command execution, status confirmation, and physical-stop safety limits.
