@@ -1138,7 +1138,10 @@ def main():
     if hasattr(args, 'func'):
         args.func = args.func(client)
 
-    return asyncio.run(client.run(args))
+    # aiomqtt uses add_reader/add_writer/remove_writer, unsupported by Windows'
+    # default ProactorEventLoop. loop_factory avoids deprecated policy overrides.
+    loop_factory = asyncio.SelectorEventLoop if sys.platform == 'win32' else None
+    return asyncio.run(client.run(args), loop_factory=loop_factory)
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import io
 import os
+import socket
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace as NS
@@ -648,6 +649,57 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.cli._client.stop.side_effect = stop
         await self.cli.stop()
         self.assertEqual(events, ["save", "stop"])
+
+
+class EventLoopTests(unittest.TestCase):
+    def check_main_factory(self, platform, expected):
+        client = Mock()
+        client.run = AsyncMock()
+
+        def run(coroutine, *, loop_factory):
+            coroutine.close()
+            self.assertIs(loop_factory, expected)
+            return 17
+
+        with patch.object(app.sys, 'platform', platform), \
+                patch.object(app.sys, 'argv', ['mammotion.py', 'devices']), \
+                patch.object(app, 'MammotionCLI', return_value=client), \
+                patch.object(app.asyncio, 'run', side_effect=run):
+            self.assertEqual(app.main(), 17)
+
+    def test_windows_main_selects_selector_loop(self):
+        self.check_main_factory('win32', asyncio.SelectorEventLoop)
+
+    def test_non_windows_main_keeps_default_loop(self):
+        self.check_main_factory('linux', None)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows MQTT regression')
+    def test_windows_main_supports_aiomqtt_socket_cleanup(self):
+        async def probe(_args):
+            import aiomqtt
+            loop = asyncio.get_running_loop()
+            self.assertIsInstance(loop, asyncio.SelectorEventLoop)
+            reader, writer = socket.socketpair()
+            try:
+                reader.setblocking(False)
+                writer.setblocking(False)
+                loop.add_reader(reader.fileno(), lambda: None)
+                self.assertTrue(loop.remove_reader(reader.fileno()))
+                # Instantiate only; never connect to a broker or mower.
+                mqtt = aiomqtt.Client('localhost')
+                mqtt._on_socket_register_write(mqtt._client, None, writer)
+                await asyncio.sleep(0)  # registration is scheduled thread-safely
+                mqtt._on_socket_unregister_write(mqtt._client, None, writer)
+            finally:
+                reader.close()
+                writer.close()
+            return 0
+
+        client = Mock()
+        client.run = probe
+        with patch.object(app.sys, 'argv', ['mammotion.py', 'devices']), \
+                patch.object(app, 'MammotionCLI', return_value=client):
+            self.assertEqual(app.main(), 0)
 
 
 class CacheTests(unittest.TestCase):

@@ -16,6 +16,10 @@ For upgrades, explicitly edit the exact inline pins and run `uv run --refresh --
 
 Global pi skill: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
+## Windows event loop
+
+The CLI passes `asyncio.SelectorEventLoop` as `asyncio.run(..., loop_factory=...)` on Windows. aiomqtt uses socket reader/writer callbacks, which the default Windows Proactor loop does not support (including `remove_writer` during paho cleanup). Keep other platforms on the default loop and avoid deprecated global event-loop policy overrides. Offline tests exercise aiomqtt socket cleanup without connecting to a broker.
+
 ## Upstream 0.10.7 facts
 
 The client manages cloud sessions, device handles, brokers, command queues, reducers and MQTT transports. Do not revive the old `MammotionBaseCloudDevice` / `MammotionCloud` / `AliyunMQTT` architecture or manually connect/disconnect for each command.
