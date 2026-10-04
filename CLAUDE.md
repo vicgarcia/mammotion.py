@@ -1,138 +1,94 @@
 # CLAUDE.md — mammotion.py implementation notes
 
-## Architecture
+## Runtime and dependency contract
 
-Single-file PEP 723 script (`uv run --script`). Requires **Python 3.14** (specified in script header). All logic lives in `mammotion.py`. The main class is `MammotionCLI`, which wraps the upstream `PyMammotionClient` from `pymammotion.client`.
+All CLI logic lives in the single-file PEP 723 script `mammotion.py`; Python **3.14+** is required. `MammotionCLI` wraps upstream `MammotionClient` from `pymammotion.client`.
 
-### PyMammotion library version
+Inline dependencies are exact: **`pymammotion==0.10.7`**, **`orjson==3.12.0`**, **`betterproto2==0.10.0`**. **`packaging==26.3`** is also required explicitly: PyMammotion imports `packaging.version` in `transport/cloud.py` but omits it from its published dependencies. A clean environment fails without it. Private API assumptions below are tied to this pinned upstream version; review them on upgrades.
 
-`pymammotion>=0.8.8` — this was a **major architectural rewrite** from the 0.5.x/0.7.0 era. The old `MammotionBaseCloudDevice`, `MammotionCloud`, and `AliyunMQTT` classes are gone. Do not attempt to use them.
+Maintain and execute the script lock with:
 
-### Communication layer
-
-The client must be instantiated with `ha_version` to send the `HA,2.X` `App-Version` header. Without it, the header is `ALIYUN DEMO,...` which Mammotion's server rejects with 403 "Access denied":
-
-```python
-self._client = MammotionClient(ha_version="0.5.7")
+```bash
+uv lock --script mammotion.py --upgrade
+uv run --locked --script mammotion.py --help
 ```
 
-All device commands go through the persistent `PyMammotionClient` instance:
+Commit `mammotion.py.lock` alongside dependency changes. `--upgrade` re-resolves within exact inline constraints, not beyond them. A standalone installed copy must have **adjacent `mammotion.py.lock`**; copy both files and use `uv run --locked --script /path/to/mammotion.py ...`. The executable shebang includes `--locked` too.
+
+Global pi skill: `~/.pi/agent/skills/mammotion/SKILL.md`.
+
+## Upstream 0.10.7 facts
+
+The client manages cloud sessions, device handles, brokers, command queues, reducers and MQTT transports. Do not revive the old `MammotionBaseCloudDevice` / `MammotionCloud` / `AliyunMQTT` architecture or manually connect/disconnect for each command.
+
+### HTTP header
+
+`MammotionClient(ha_version="0.5.7")` retains the CLI's integration header configuration. In 0.10.7, `MammotionHTTP` formats `App-Version` as `HA,2.{ha_version}` when supplied, and **`NOT HA,{APP_VERSION}`** otherwise. The old claim that omitting `ha_version` produces `ALIYUN DEMO,...` and necessarily causes a 403 is outdated; that value is a commented-out legacy alternative, not the current default.
+
+### Commands and priority
 
 ```python
-await self._client.send_command_with_args(device_name, "command_name", **kwargs)
+from pymammotion.messaging.command_queue import Priority
+
+await client.send_command_with_args(
+    device_name, "pause_execute_task", priority=Priority.USER
+)
+result = await client.send_command_and_wait(
+    device_name, "generate_route_information", "bidire_reqconver_path",
+    priority=Priority.USER, **route_kwargs
+)
 ```
 
-The client manages MQTT sessions internally — there is no manual connect/disconnect per command. The library maintains persistent Aliyun MQTT (pre-2025 devices) and/or Mammotion MQTT (post-2025 devices) connections in the background.
+`send_command_with_args` defaults to `Priority.NORMAL` (queued). For genuine user actions, `Priority.USER` dispatches on the caller's task, bypassing queue delays and self-imposed quotas. It does **not** bypass a cloud 429 ban or create a missing transport. `send_command_and_wait` already uses the broker directly; USER exempts its advisory quota rather than bypassing a queue. Do not mark routine background polling as USER indiscriminately.
 
-For request/response commands (where you need to wait for a reply):
-```python
-result = await self._client.send_command_and_wait(device_name, "command_name", "expected_proto_field")
-```
+Transport completion or a matching response is not proof the requested action completed. Start/pause/resume/return/cancel require fresh state confirmation and explicit failure/unconfirmed reporting on timeout. Do not translate a cloud priority enum into an emergency-stop guarantee.
 
-### Session helpers
+## Readiness, freshness and session persistence
 
-- `get_device_state(device_name)` — sends sync+report commands, polls `_client.get_device_by_name()` until sys_status is non-zero, returns state dict.
-- `get_area_list(device_name)` — calls `send_command_and_wait(device, "get_area_name_list", "toapp_all_hash_name", device_id=iot_id)`. Do NOT use `start_map_sync` for this — it's a 5-minute saga that fetches the entire map and never exits cleanly from a CLI context.
-- `_run_command_with_state_check(args, can_run_fn, cmd, ...)` — gets device state, checks precondition, sends command. Used by pause/resume/return/cancel.
+- Login/credential restoration can finish before MQTT is usable. Wait for the **selected device's usable transport**; an unrelated device or account connection is insufficient. Metadata-only device listing and RTK status do not require mower telemetry.
+- An MQTT readiness timeout is a connection failure, **not** a reason to force login. Preserve cached credentials on transient/network failure; distinguish actual authentication rejection from connectivity errors.
+- `get_device_state()` requests fresh telemetry through `client.refresh_status` and a temporary pinned **`handle._reducer.apply`** hook. Only newly applied `toapp_report_data` packets containing `dev` can satisfy status predicates. RTK/work-only packets retain old status and must not count; unchanged fresh dev reports must count even when no state-change event fires. Restore the hook in `finally`. Review this private API on upgrades.
+- Cache: `~/.mammotion.json`, sensitive reusable credentials. Register the async `client.on_credentials_updated` callback to serialize `client.to_cache()` after refreshes; save the latest credentials again on shutdown after successful login, before closing the client. During restoration, merge rotated login tokens into the original cache so an early callback cannot discard not-yet-restored Aliyun/device blocks. Do not discard a good cache just because network restoration failed.
+- Mobile apps and other integrations share cloud account/session resources. Concurrent clients may contend for sessions or alter device state between checks. Avoid forced login loops and never infer target readiness from successful authentication.
 
-### Connection readiness
+Use current registry/handle APIs (`get_device_by_name`, `mower`) rather than obsolete device-list assumptions. `device.report_data.dev.charge_state` is separate from `sys_status`: expose its nonzero value as `docked`. A mower may report READY while still docked; status names alone are not docking or safety checks.
 
-After `login()` / `restore_credentials()`, the MQTT transport task is started but the connection handshake hasn't completed yet. Sending commands immediately causes a race condition (first run times out, second run works).
+## Capability boundaries
 
-`_wait_for_connection(timeout=12.0)` polls `session.aliyun_transport.is_connected` (or `mammotion_transport`) every 250ms until True. It is called in `run()` after login and before the first command. Do not remove this — without it, first-run commands reliably fail.
+- **RTK:** device listing and metadata-only status (cloud online/offline, product details), not mower actions or fresh mower reports.
+- **Luba 1:** `areas` / `start` must fail clearly. The area-name shortcut is unsupported; do not silently launch a full map sync as a fallback.
+- **Yuka:** reject autonomous start until model-specific route and height validation. Upstream model recognition does not prove this CLI supports its route semantics.
+- Start rejects Yuka, Luba 1, and names failing `DeviceType.is_luba_pro`. That upstream helper is a broad classifier, **not H-variant detection** or a generic support guarantee.
+- This CLI's autonomous start assumes **Luba 2 / Luba Pro H variants with 55–100 mm height, 5 mm steps**. Names cannot establish H hardware. **The caller must verify the H variant and applicable range before starting.** Do not claim automatic H detection or generic support for other Luba/Yuka models.
 
-### Auth cache
+## Route construction and start
 
-- Cache file: `~/.mammotion.json`
-- On login: `_client.to_cache()` serializes credentials, saved to file.
-- On startup: `_client.restore_credentials(email, password, cache_dict)` restores session without re-authenticating.
-- If restore fails, falls back to fresh `login_and_initiate_cloud(email, password)`.
+1. Verify supported family and caller-verified H hardware, target readiness, fresh status and start preconditions.
+2. Fetch area names/hashes with `get_area_name_list` / `toapp_all_hash_name` on supported models; resolve requested areas explicitly.
+3. Construct upstream **`OperationSettings`** and use **`build_route_information`** for route configuration and correct model-specific path flags. Avoid hand-crafted route byte offsets.
+4. Send `generate_route_information` and wait for `bidire_reqconver_path`, using `Priority.USER`.
+5. Send `start_job` with `Priority.USER` and confirm a newly reported working state. An acknowledgement alone is not successful mowing.
 
-### Device registry
+Height conversion remains `round(inches * 25.4 / 5) * 5`, clamped to [55, 100] mm under the H assumption. Chessboard's **included angle is fixed to 90°**; the user-supplied mowing angle is the base direction. Firmware controls autonomous blade activation. Do not append manual `set_blade_control` or joystick commands as an autonomous-start workaround.
 
-After login, devices are registered internally by `PyMammotionClient`:
-- `_client.aliyun_device_list` — pre-2025 devices (Aliyun MQTT)
-- `_client.mammotion_device_list` — post-2025 devices (Mammotion MQTT)
-- `_client.get_device_by_name(name)` — returns `MowerDevice` state object
-- `_client.mower(name)` — returns `DeviceHandle`
+### Correct saga and sync facts
 
-## Commands to avoid
+The CLI uses direct route request/response rather than fetching all cover paths for start. This is a deliberate limited workflow, **not** a workaround for the former claimed `MowPathSaga` constructor bug: in 0.10.7 `_route_val = route_info if skip_planning else None`. Ordinary planning with `route_info` does plan the route; `skip_planning=True` is for fetching an already-running job's known path.
 
-- **`start_map_sync()`** — launches a full `MapFetchSaga` with a 5-minute timeout that runs as a background task. The CLI never exits cleanly. Use `send_command_and_wait(..., "get_area_name_list", "toapp_all_hash_name")` instead.
-- **`send_todev_ble_sync(sync_type=3)`** — a BLE radio sync command in the device firmware. Has nothing to do with cloud MQTT availability. Do not use as a "warmup".
+`MapFetchSaga` fetches the full map, with area names skipped for Luba 1 and multi-frame hash/data acknowledgement handling. Do not repeat the old blanket claim that it always has a five-minute timeout or never exits cleanly. Full-map fetching is unnecessary for this CLI's supported area-name shortcut; Luba 1 needs a different model-specific workflow that is not implemented here.
 
-## Key implementation details
+`send_todev_ble_sync(sync_type=3)` is the upstream **IoT/MQTT app sync** (2 is BLE); it is not solely a BLE radio operation. Upstream sagas use it before major requests. It does not establish MQTT transport readiness, replace freshness checks, or justify forced login.
 
-### Blade motor activation (Luba 2 / Luba Pro)
+## Other actions and history
 
-Blade motor activation during autonomous mowing is **controlled entirely by the device firmware**. No explicit blade control command should be sent.
+Pause/resume/return/cancel fetch fresh state, validate preconditions, send with `Priority.USER`, then wait for the corresponding fresh state confirmation. Known action builders include `pause_execute_task`, `resume_execute_task`, `return_to_dock`, `cancel_job`, and `start_job`; verify builder names against the pinned source when changing commands.
 
-The `path_order` byte string passed in `GenerateRouteInformation` contains mode flags:
-- **`path_order_bytes[5] = 8`** for Luba 2 / Luba Pro (`DeviceType.is_luba_pro()` returns True)
-- **`path_order_bytes[5] = 0`** for Luba 1
+Resume uses `resume_execute_task` (action=3), not `start_job` (action=1). Schedules use correlated `read_plan` / `todev_planjob_set` replies decoded by `Plan.from_wire`, never cached plans; history uses `query_job_history` / `request_job_history`. If reports temporarily replace/wrap a reducer hook to collect responses, **restore the original hook in `finally`**, including timeout, exception and cancellation paths. Never leave the client reducer patched after a reports command.
 
-Without `bArr[5] = 8`, the device navigates the route geometry but does not engage the cutting motor. This is the `reserved` field in `NavReqCoverPath` proto.
+Selected `sys_status` values: READY=11, WORKING=13, RETURNING=14, CHARGING=15, PAUSE=19, MANUAL_MOWING=20. These are telemetry, not safety certification.
 
-Do **not** add `set_blade_control(on_off=1)` or `operate_on_device(...)` after `start_job` — these are manual/joystick commands that have no effect during autonomous route execution.
+## Safety contract
 
-### Blade height
+The CLI cannot guarantee safety. Cloud pause/cancel/return are ordinary remote requests, never an emergency stop; return may move the mower. Network delay, account contention and confirmation failure can make outcomes uncertain. Use the **physical STOP button** in an emergency. Do not blindly retry an unconfirmed start or resume: inspect fresh state and the physical mower first.
 
-- Luba 2 "H" models: 55–100mm in 5mm increments (2.2–3.9 inches)
-- Conversion: `round(inches * 25.4 / 5) * 5`, clamped to [55, 100]
-- Sent as `blade_height` in `GenerateRouteInformation` → maps to `knife_height` in `NavReqCoverPath`
-- The device physically adjusts blade height when it arrives at the mowing zone.
-
-### Device detection
-
-- `DeviceType.is_luba_pro(device_name)` — True for Luba 2 and higher
-- Our Luba 2 device: `Luba-VSAMK6N4`
-
-### Device status codes (sys_status)
-
-| Value | Name | Meaning |
-|-------|------|---------|
-| 11 | READY | Charged and ready |
-| 13 | WORKING | Actively mowing |
-| 14 | RETURNING | Returning to dock |
-| 15 | CHARGING | On dock, charging |
-| 19 | PAUSE | Job paused |
-| 20 | MANUAL_MOWING | Manual/joystick control |
-
-### Docked indicator (charge_state)
-
-`device.report_data.dev.charge_state` (proto `rpt_dev_status.charge_state`) is a separate field from `sys_status` — nonzero whenever the mower is physically on the dock, regardless of `sys_status`. It's more reliable than inferring "docked" from `status_name`: once the battery hits 100%, `sys_status` can read READY/ONLINE while the mower is still sitting on the dock, whereas `charge_state` stays nonzero the whole time. This is the same signal pymammotion's own `handle.py` `device_mode()` uses to distinguish `DOCKED_FULL`/`DOCKED_CHARGING` from `ACTIVE`/`IDLE`.
-
-`get_device_state()` exposes this as `docked: bool`, and `cmd_status` prints it as a `Docked: yes/no` line.
-
-### Command flow for `start`
-
-1. `get_area_list()` — fetches area names/hashes via `get_area_name_list`
-2. `send_command_and_wait(device, "generate_route_information", "bidire_reqconver_path", ...)` — sends route config and waits for device confirmation
-3. `send_command_with_args(device, "start_job")` — begins execution
-4. Device runs autonomously from this point
-
-**Do NOT use `MowPathSaga` for starting mowing.** When `route_info` is passed to `MowPathSaga.__init__`, it sets `_route_val = route_info`, causing step 2 of the saga (send `generate_route_information`) to be skipped entirely on the first run. The device never receives the route configuration, so `start_job` silently does nothing. Send `generate_route_information` directly via `send_command_and_wait` instead.
-
-### Command flow for pause/resume/return/cancel
-
-1. `get_device_state()` — get current sys_status via MQTT
-2. Check preconditions (is device in the right state?)
-3. `send_command_with_args(device, cmd_name)` — send the command
-
-### Known command names (passed as strings to send_command_with_args)
-
-- `send_todev_ble_sync` (sync_type=3) — sync device state
-- `get_report_cfg` — request current status report
-- `start_job` — `NavTaskCtrl(type=1, action=1)`
-- `cancel_job` — `NavTaskCtrl(type=1, action=4)`
-- `return_to_dock` — `NavTaskCtrl(type=1, action=5)`
-- `pause_execute_task` — `NavTaskCtrl(type=1, action=2)`
-- `read_plan` (sub_cmd=2, plan_index=N) — fetch scheduled tasks
-- `get_area_name_list` — area names
-- `get_all_boundary_hash_list` (sub_cmd=0) — boundary hashes
-- `query_job_history` — check if history available
-- `request_job_history` (num=N) — fetch N work reports
-
-### IDE import warning
-
-The IDE warns that `pymammotion.client` can't be resolved. This is expected — the package is installed at runtime by `uv run --script`, not in the local environment. The warning is harmless.
+An unresolved IDE import can reflect uv's isolated script environment. Resolve imports against the locked environment rather than weakening pins or adding unrelated dependencies.

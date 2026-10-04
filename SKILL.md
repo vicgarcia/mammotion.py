@@ -1,168 +1,103 @@
 ---
 name: mammotion
-description: Control Mammotion robotic mowers (Luba, Yuka) via cloud API. Start/stop mowing jobs, check status, manage areas, view schedules and history. Use when the user wants to control their robot lawn mower.
-compatibility: Requires 'mammotion.py' script in PATH with MAMMOTION_EMAIL and MAMMOTION_PASSWORD environment variables set.
+description: Control Mammotion robotic mowers via cloud API, inspect status, areas, schedules and history. Autonomous start is limited to caller-verified Luba 2 / Pro H variants; cloud actions are not emergency stops.
+compatibility: Requires Python 3.14+, uv, mammotion.py with adjacent mammotion.py.lock, and MAMMOTION_EMAIL/MAMMOTION_PASSWORD environment variables.
 ---
 
 # Mammotion Robotic Mower Control
 
-Control Mammotion robotic mowers via cloud API using the `mammotion.py` CLI. Supports Luba, Yuka, and other Mammotion models.
+Global skill location: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
-## Authentication
+Use the single-file CLI with PyMammotion **0.10.7**, explicit `orjson==3.12.0` and `betterproto2==0.10.0`, and its script lockfile. `packaging==26.3` is explicit because PyMammotion imports it without declaring it.
 
-Credentials are loaded from environment variables:
+## Safety and capability boundaries
+
+- The CLI **cannot guarantee safety**. In an emergency, instruct the user to use the mower's **physical STOP button**. Never describe cloud pause, cancel, or return as an emergency stop. Return may cause movement.
+- Obtain the user's authorization before starting, resuming, or otherwise moving a mower. Check fresh status and the physical environment; battery, online/READY, or charging state alone does not establish safety.
+- Autonomous start assumes **Luba 2 / Luba Pro H hardware: 55–100 mm in 5 mm increments**. The CLI rejects Yuka, Luba 1, and names failing `DeviceType.is_luba_pro`, but cannot identify H hardware from a name. **Ask the caller to verify the H variant and height range**; do not treat the name gate as automatic H detection.
+- **Luba 1:** `areas` and `start` fail clearly because the area-name shortcut is unsupported. Do not invent a generic route or full-map fallback.
+- **Yuka:** start is unsupported until model-specific route and height validation. Listing/status support does not imply autonomous start support.
+- **RTK:** listing and metadata-only status (cloud online/offline and product info), not mower telemetry or mower actions.
+- Actions use `Priority.USER` and wait for state confirmation. A send/acknowledgement alone does not prove execution. An unconfirmed outcome may still have moved the mower: fetch fresh status before retrying; do not blindly repeat a start.
+
+## Locked execution and authentication
+
+Prefer an explicit script path. For the standalone installation:
+
 ```bash
-export MAMMOTION_EMAIL="your@email.com"
-export MAMMOTION_PASSWORD="yourpassword"
+uv run --locked --script ~/.local/bin/mammotion.py devices
 ```
 
-Or passed directly: `mammotion.py -e email -p password <command>`
+Every example below assumes the repository working directory; replace `mammotion.py` with the installed path as needed. The standalone script requires **adjacent `mammotion.py.lock`**. Do not bypass `--locked` or silently re-resolve dependencies.
 
-Auth tokens are cached automatically at `~/.mammotion.json` for faster subsequent calls. If authentication fails with a cached session, the tool retries with a fresh login automatically.
+For deliberate dependency maintenance only:
 
-## Commands Reference
-
-### List Devices
 ```bash
-mammotion.py devices
-```
-Lists all mowers and RTK base stations on the account.
-
-### Check Status
-```bash
-mammotion.py status --device Luba-XXXXXX
-```
-Returns:
-- Status (idle, mowing, charging, paused, returning)
-- Battery percentage
-- Progress and time remaining (when mowing)
-- Position coordinates and heading
-- Blade height
-- RTK fix quality and satellite count
-- Lifetime stats (hours, mileage)
-
-### Start Mowing
-```bash
-# Basic - mow specific areas
-mammotion.py start --device Luba-XXXXXX --areas front-yard back-yard
-
-# Full options
-mammotion.py start --device Luba-XXXXXX \
-  --areas front-yard \
-  --pattern zigzag \
-  --cutting-height 2.8 \
-  --path-spacing 10.0 \
-  --perimeter-laps 2 \
-  --mow-order grid-first \
-  --mowing-angle 45 \
-  --speed 0.5
+uv lock --script mammotion.py --upgrade
 ```
 
-**Start Options:**
-| Option | Default | Range/Values | Description |
-|--------|---------|--------------|-------------|
-| `--areas` | required | area names | Area names to mow, space-separated, no quotes |
-| `--pattern` | zigzag | zigzag, chessboard, perimeter, adaptive | Mowing path pattern |
-| `--cutting-height` | 2.5 | 2.2-3.9 inches | Blade cutting height |
-| `--path-spacing` | 10.0 | 7.9-13.8 inches | Distance between mowing passes |
-| `--perimeter-laps` | 2 | 0-4 | Number of border passes |
-| `--mow-order` | grid-first | grid-first, perimeter-first | Order of operations |
-| `--mowing-angle` | 0 | 0-359 degrees | Direction of mowing lines |
-| `--speed` | 0.25 | 0.0-1.0 | Mowing speed (0=slow, 1=fast) |
+Review the resulting lockfile; exact inline pins do not upgrade themselves. Copy both script and lockfile when updating a standalone installation.
 
-### Control Commands
+Credentials come from `MAMMOTION_EMAIL` and `MAMMOTION_PASSWORD`, or global `-e EMAIL -p PASSWORD` arguments. Prefer environment variables; never expose passwords or the sensitive `~/.mammotion.json` cache in logs/responses.
+
+The cache is saved via the credentials-update callback and on shutdown. Network failure preserves it; MQTT timeout does not force a fresh login. Authentication rejection is distinct from connection failure. Do not delete the cache or repeatedly log in as a generic connectivity remedy.
+
+Mobile apps and other integrations share cloud account/session resources. Concurrent clients may contend for sessions, interrupt MQTT or change state between checks. Avoid competing control and repeated logins. Target-device readiness, not merely account login or another device's connection, is required.
+
+## Command reference
+
+### Inspect before acting
+
 ```bash
-# Pause active mowing job
-mammotion.py pause --device Luba-XXXXXX
-
-# Resume paused job
-mammotion.py resume --device Luba-XXXXXX
-
-# Return to charging dock
-mammotion.py return --device Luba-XXXXXX
-
-# Cancel current job
-mammotion.py cancel --device Luba-XXXXXX
+uv run --locked --script mammotion.py devices
+uv run --locked --script mammotion.py status --device Luba-XXXXXX
+uv run --locked --script mammotion.py areas --device Luba-XXXXXX
 ```
 
-### List Mowing Areas
+Mower status requests fresh telemetry: state, battery, docked indicator, progress, position, height and RTK information where available. A timeout is not valid fresh status. Zone names/hashes come from the mower; zones are created in the mobile app.
+
+### Start (caller-verified H variant only)
+
 ```bash
-mammotion.py areas --device Luba-XXXXXX
-```
-Lists all defined mowing zones with their names and hashes. Areas are created in the Mammotion mobile app.
-
-### View Schedules
-```bash
-mammotion.py schedule --device Luba-XXXXXX
-mammotion.py schedule --device Luba-XXXXXX --verbose  # debug info
-```
-Shows scheduled mowing tasks with times, days, areas, and settings.
-
-### Mowing History
-```bash
-mammotion.py reports --device Luba-XXXXXX
-mammotion.py reports --device Luba-XXXXXX --count 20  # more reports
-```
-Returns mowing session history with timestamps, duration, area covered, and completion status.
-
-## Mowing Patterns Explained
-
-| Pattern | Description |
-|---------|-------------|
-| `zigzag` | Single-pass back and forth lines (efficient, default) |
-| `chessboard` | Cross-hatch pattern with perpendicular passes (thorough cut) |
-| `perimeter` | Border/edge only, no interior mowing |
-| `adaptive` | Smart zigzag that adapts to terrain |
-
-## RTK Base Stations
-
-RTK devices (names starting with "RTK") have limited commands:
-- `status` shows online/offline and product info
-- Other commands return "RTK does not support this command"
-
-## Example Workflows
-
-**Quick mow the front yard:**
-```bash
-mammotion.py start --device Luba-XXXXXX --areas front-yard
+uv run --locked --script mammotion.py start --device Luba-XXXXXX \
+  --areas front-yard --pattern chessboard --cutting-height 2.5 \
+  --path-spacing 10.0 --perimeter-laps 2 --mow-order grid-first \
+  --mowing-angle 45 --speed 0.25
 ```
 
-**Thorough cut with cross-hatch pattern:**
+| Option | Default | Range/values |
+|--------|---------|--------------|
+| `--areas` | required | Space-separated names; quote individual names containing spaces |
+| `--pattern` | zigzag | zigzag, chessboard, perimeter, adaptive |
+| `--cutting-height` | 2.5 | 2.2–3.9 inches, converted to 5 mm steps within 55–100 mm |
+| `--path-spacing` | 10.0 | 7.9–13.8 inches |
+| `--perimeter-laps` | 2 | 0–4 |
+| `--mow-order` | grid-first | grid-first, perimeter-first |
+| `--mowing-angle` | 0 | 0–359 degrees (base direction) |
+| `--speed` | 0.25 | 0.0–1.0 normalized speed |
+
+Zigzag is a single-pass line pattern; chessboard uses perpendicular passes with **fixed 90° included angle**. Perimeter is border-only; adaptive is the upstream adaptive pattern. Route configuration uses upstream `OperationSettings` / `build_route_information` for model flags; do not improvise route bytes or manual blade commands.
+
+### Ordinary remote actions
+
 ```bash
-mammotion.py start --device Luba-XXXXXX --areas backyard \
-  --pattern chessboard --cutting-height 2.5 --speed 0.3
+uv run --locked --script mammotion.py pause --device Luba-XXXXXX
+uv run --locked --script mammotion.py resume --device Luba-XXXXXX
+uv run --locked --script mammotion.py return --device Luba-XXXXXX
+uv run --locked --script mammotion.py cancel --device Luba-XXXXXX
 ```
 
-**Check if mower is available:**
+These check state preconditions and confirm the resulting state. Cloud connectivity or confirmation can fail; none is a safety-rated stop.
+
+### Schedules and history
+
 ```bash
-mammotion.py status --device Luba-XXXXXX
-# If charging with high battery, it's ready to mow
+uv run --locked --script mammotion.py schedule --device Luba-XXXXXX
+uv run --locked --script mammotion.py reports --device Luba-XXXXXX --count 20
 ```
 
-**Emergency stop and return:**
-```bash
-mammotion.py cancel --device Luba-XXXXXX
-mammotion.py return --device Luba-XXXXXX
-```
+Schedules list task settings; reports show session history. Neither establishes current mower readiness.
 
-## Device Status Values
+## Interpreting state
 
-| Status | Meaning |
-|--------|---------|
-| online/idle | Ready to mow |
-| mowing | Actively cutting grass |
-| paused | Job paused, can resume |
-| returning to dock | Heading back to charger |
-| charging | On dock, charging |
-| ready | Charged and ready |
-| locked | Device is locked |
-| location error | GPS/RTK fix issue |
-
-## Tips
-
-- Always check `status` before starting a job to verify battery and RTK fix
-- Use `areas` command first to see available zone names for `--areas` parameter
-- The `--speed` parameter affects battery consumption; lower speeds = longer runtime
-- Perimeter laps clean up edges; 2 laps is a good default
-- Mowing angle of 0° = east-west lines, 90° = north-south lines
-- Cross-hatch different angles on alternating mows for healthier lawn
+`mowing` means active work; `paused` means a resumable job; `returning` means movement toward the dock. `charging` and `ready` do not alone prove safe operation. Use the explicit docked indicator instead of inferring docking from the state name. Locked, offline, location-error, or unconfirmed telemetry requires investigation, not an automatic retry.
