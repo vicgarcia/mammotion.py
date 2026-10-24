@@ -50,7 +50,7 @@ export MAMMOTION_EMAIL="you@example.com"
 export MAMMOTION_PASSWORD="yourpass"
 ```
 
-Alternatively pass `-e EMAIL -p PASSWORD` before the command (arguments may be visible in process listings/history). Treat `~/.mammotion.json` as sensitive: it stores reusable session credentials. Credential-update callbacks persist refreshed credentials, and shutdown saves the latest cache.
+Alternatively pass `-e EMAIL -p PASSWORD` before the command (arguments may be visible in process listings/history). Treat `~/.mammotion.json` as sensitive: it stores reusable session credentials. Set `MAMMOTION_CACHE_DIR` to keep it elsewhere (e.g. a container bind mount). Credential-update callbacks persist refreshed credentials, and shutdown saves the latest cache.
 
 Cached sessions are restored where possible. If a cached token has expired (e.g. the cache sat unused for a few weeks), the CLI performs one fresh login and rewrites the cache; a network failure preserves the cache without logging in again. An MQTT readiness timeout does **not** trigger a forced login or imply expired credentials.
 
@@ -80,6 +80,8 @@ uv run --script mammotion.py reports --device Luba-ABC123 --count 20
 | `cancel` | Request cancellation of the current job |
 | `schedule` | List scheduled tasks |
 | `reports` | Show mowing history |
+
+For scripts, `status --json` prints the fresh mower state as one JSON object and `reports --json` prints a JSON array of raw report fields (epoch-second timestamps, `work_result` 5 = completed). The exit code is nonzero whenever the command fails or an action is not confirmed.
 
 Commands requiring mower communication wait for **the selected device's transport**, not an unrelated device/account connection. Actions use `Priority.USER` and wait for fresh state confirmation. A send or acknowledgement alone is not success; a timeout means the outcome is unconfirmed, not necessarily that nothing happened. Check fresh status before considering a retry.
 

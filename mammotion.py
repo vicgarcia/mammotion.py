@@ -49,8 +49,8 @@ CM_PER_INCH = 2.54
 METERS_TO_MILES = 0.000621371
 SQFT_PER_SQM = 10.764
 
-# auth cache
-AUTH_CACHE_FILE = Path.home() / '.mammotion.json'
+# auth cache (MAMMOTION_CACHE_DIR relocates it, e.g. onto a container bind mount)
+AUTH_CACHE_FILE = Path(os.environ.get('MAMMOTION_CACHE_DIR') or Path.home()) / '.mammotion.json'
 
 
 class MammotionWorkMode(Enum):
@@ -459,6 +459,14 @@ class MammotionCLI:
             print(f"\n{'=' * 70}")
 
     async def cmd_status(self, args) -> None:
+        if getattr(args, 'json', False):
+            if not self.check_not_rtk(args.device):
+                return
+            state = await self.get_device_state(args.device)
+            if state:
+                print(orjson.dumps({'device': args.device, **state}).decode())
+            return
+
         print(f"\nStatus for {args.device}:")
         print("=" * 70)
         print()
@@ -937,6 +945,21 @@ class MammotionCLI:
                         # 10s with no new record — device is done sending
                         break
 
+            # sort by start time (newest first)
+            work_reports.sort(key=lambda r: r['start_work_time'], reverse=True)
+
+            if args.today_only:
+                today = datetime.now().strftime("%Y-%m-%d")
+                work_reports = [
+                    r for r in work_reports
+                    if r['start_work_time'] > 0
+                    and datetime.fromtimestamp(r['start_work_time']).strftime("%Y-%m-%d") == today
+                ]
+
+            if getattr(args, 'json', False):
+                print(orjson.dumps(work_reports).decode())
+                return
+
             if not args.content_only:
                 print(f"\nMowing History for {args.device}:")
                 print("=" * 70)
@@ -944,16 +967,6 @@ class MammotionCLI:
             if not work_reports:
                 print("\nNo mowing reports available")
             else:
-                # sort by start time (newest first)
-                work_reports.sort(key=lambda r: r['start_work_time'], reverse=True)
-
-                if args.today_only:
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    work_reports = [
-                        r for r in work_reports
-                        if r['start_work_time'] > 0
-                        and datetime.fromtimestamp(r['start_work_time']).strftime("%Y-%m-%d") == today
-                    ]
 
                 # work type and result name maps
                 work_type_names = {
@@ -1086,6 +1099,7 @@ def main():
     # status command
     status_parser = subparsers.add_parser('status', help='show device status')
     status_parser.add_argument('--device', required=True, help='device name')
+    status_parser.add_argument('--json', action='store_true', help='print fresh mower state as one JSON object (mowers only)')
     status_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_status(args))
 
     # start command
@@ -1139,6 +1153,7 @@ def main():
     reports_parser.add_argument('--verbose', '-v', action='store_true', help='show additional debugging information')
     reports_parser.add_argument('--content-only', action='store_true', help='omit header and divider bars')
     reports_parser.add_argument('--today-only', action='store_true', help='filter output to reports from today only')
+    reports_parser.add_argument('--json', action='store_true', help='print reports as a JSON array (raw fields, epoch seconds)')
     reports_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_reports(args))
 
     args = parser.parse_args()

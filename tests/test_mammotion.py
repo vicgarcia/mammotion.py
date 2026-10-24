@@ -609,6 +609,40 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(cli.exit_code, 1)
                 self.assertIs(reducer.apply, original)
 
+    async def test_status_json_prints_fresh_state_object(self):
+        self.cli.get_device_state = AsyncMock(return_value={"status": 11, "status_name": "ready",
+                                                            "docked": True, "battery": 95})
+        await self.cli.cmd_status(NS(device=DEVICE, json=True))
+        self.assertEqual(app.orjson.loads(self.output.getvalue()),
+                         {"device": DEVICE, "status": 11, "status_name": "ready", "docked": True, "battery": 95})
+        self.assertEqual(self.cli.exit_code, 0)
+
+    async def test_status_json_failure_prints_no_json(self):
+        self.cli.get_device_state = AsyncMock(return_value=None)
+        await self.cli.cmd_status(NS(device=DEVICE, json=True))
+        self.assertNotIn("{", self.output.getvalue())
+
+    async def test_reports_json_prints_collected_reports(self):
+        from pymammotion.proto import LubaMsg, MctlNav, WorkReportInfoAck
+        reducer = self.cli._client.mower.return_value._reducer
+        session = NS(interrupt_flag=False, start_work_time=1_760_000_000, end_work_time=1_760_016_000,
+                     work_time_used=16_000, work_area=660.0, work_progress=100, height_of_knife=65,
+                     work_type=2, work_result=5)
+        reducer.apply = Mock(return_value=NS(work_session_result=session))
+
+        async def send(_device, command, **_kwargs):
+            if command == "request_job_history":
+                reducer.apply(None, LubaMsg(nav=MctlNav(toapp_work_report_ack=WorkReportInfoAck())))
+
+        self.cli._client.send_command_with_args.side_effect = send
+        args = NS(device=DEVICE, count=1, content_only=False, today_only=False, verbose=False, json=True)
+        await self.cli.cmd_reports(args)
+        reports = app.orjson.loads(self.output.getvalue())
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0]["work_result"], 5)
+        self.assertEqual(reports[0]["start_work_time"], 1_760_000_000)
+        self.assertEqual(self.cli.exit_code, 0)
+
     async def test_rotated_tokens_callback_preserves_other_cache_blocks_on_failed_restore(self):
         previous = {
             "mammotion_data": {"token": "old"},

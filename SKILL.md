@@ -96,7 +96,7 @@ uv run --script mammotion.py schedule --device Luba-XXXXXX
 uv run --script mammotion.py reports --device Luba-XXXXXX --count 20
 ```
 
-Schedules list task settings; reports show session history. Neither establishes current mower readiness.
+Schedules list task settings and whether each is enabled; reports show session history. Neither establishes current mower readiness. Add `--json` to `status` or `reports` for machine-readable output.
 
 ## Interpreting state
 
