@@ -81,6 +81,8 @@ Use current registry/handle APIs (`get_device_by_name`, `mower`) rather than obs
 4. Send `generate_route_information` and wait for `bidire_reqconver_path`, using `Priority.USER`.
 5. Send `start_job` with `Priority.USER` and confirm a newly reported working state. An acknowledgement alone is not successful mowing.
 
+`start_progress` (0–99, CLI `--start-progress`) maps to upstream `OperationSettings.start_progress`, which `create_path_order` writes to `path_order` byte 3 — the app's "job start progress", used to resume a stopped job by re-running identical settings part-way. Upstream does not document the unit (one comment calls it a "starting waypoint index"); it is assumed to be the app's percentage and still needs one supervised verification on hardware. Also unverified: whether a resumed job's reported `work_progress` is absolute or relative to its start.
+
 Height conversion remains `round(inches * 25.4 / 5) * 5`, clamped to [55, 100] mm under the H assumption. Chessboard's **included angle is fixed to 90°**; the user-supplied mowing angle is the base direction. Firmware controls autonomous blade activation. Do not append manual `set_blade_control` or joystick commands as an autonomous-start workaround.
 
 ### Correct saga and sync facts

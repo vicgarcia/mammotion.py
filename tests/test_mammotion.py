@@ -65,7 +65,7 @@ def report_packet(has_dev=True):
 def start_args(**overrides):
     values = dict(device=DEVICE, speed=0.25, cutting_height=2.5, path_spacing=10.0,
                   perimeter_laps=2, mowing_angle=25, pattern="chessboard",
-                  mow_order="grid-first", areas=["Front"])
+                  mow_order="grid-first", areas=["Front"], start_progress=0)
     values.update(overrides)
     return NS(**values)
 
@@ -772,8 +772,26 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cli._send_action.await_count, 1)
         self.assertEqual(self.output.getvalue(), "", "library calls must not print")
 
+    async def test_start_progress_is_sent_in_route_path_order(self):
+        self.cli.get_device_state = AsyncMock(return_value={"status": 15, "status_name": "charging"})
+        self.cli.get_area_list = AsyncMock(return_value=[NS(name="Front", hash=123)])
+        self.cli._send_action = AsyncMock()
+        for progress in (0, 57):
+            with self.subTest(progress=progress):
+                await self.cli.start_mowing(DEVICE, ["Front"], start_progress=progress)
+                route = self.cli._client.send_command_and_wait.await_args.kwargs["generate_route_information"]
+                # byte 3 of path_order is the app's job start progress
+                self.assertEqual(route.path_order.encode("latin-1")[3], progress)
+
+    async def test_cli_start_passes_start_progress(self):
+        self.cli.start_mowing = AsyncMock(return_value=[NS(name="Front", hash=123)])
+        await self.cli.cmd_start(start_args(start_progress=57))
+        self.assertEqual(self.cli.start_mowing.await_args.kwargs["start_progress"], 57)
+        self.assertIn("start progress: 57%", self.output.getvalue())
+
     async def test_library_rejects_invalid_pattern_and_order_before_mower_traffic(self):
-        for kwargs in ({"pattern": "spiral"}, {"mow_order": "sideways"}, {"speed": 2.0}):
+        for kwargs in ({"pattern": "spiral"}, {"mow_order": "sideways"}, {"speed": 2.0},
+                       {"start_progress": 100}, {"start_progress": -1}, {"start_progress": 50.5}):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(app.MammotionError):
                     await self.cli.start_mowing(DEVICE, ["Front"], **kwargs)

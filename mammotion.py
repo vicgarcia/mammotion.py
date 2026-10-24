@@ -519,6 +519,7 @@ class Mammotion:
         mow_order: str = 'grid-first',
         mowing_angle: int = 0,
         speed: float = 0.25,
+        start_progress: int = 0,
     ) -> list[AreaHashNameList]:
         """Plan a route over the named areas and start it, confirmed by a fresh WORKING report.
 
@@ -543,6 +544,8 @@ class Mammotion:
             raise MammotionError(f"perimeter laps must be between 0 and 4 (got {perimeter_laps})")
         if mowing_angle < 0 or mowing_angle > 359:
             raise MammotionError(f"mowing angle must be between 0 and 359 degrees (got {mowing_angle})")
+        if not isinstance(start_progress, int) or start_progress < 0 or start_progress > 99:
+            raise MammotionError(f"start progress must be a whole percent between 0 and 99 (got {start_progress})")
         if pattern not in PATTERNS:
             raise MammotionError(f"pattern must be one of {', '.join(PATTERNS)} (got {pattern})")
         if mow_order not in MOW_ORDERS:
@@ -584,6 +587,8 @@ class Mammotion:
             toward_included_angle=90,
             toward_mode=1,
             border_mode=MOW_ORDERS[mow_order],
+            # the app's "start progress": begin the route part-way, e.g. to resume a stopped job
+            start_progress=start_progress,
             is_dump=False,
         )
         route_info = build_route_information(
@@ -932,6 +937,8 @@ class MammotionCLI(Mammotion):
                   f"({int(args.path_spacing * CM_PER_INCH)}cm), perimeter laps: {args.perimeter_laps}")
             print(f"  mow order: {args.mow_order}, speed: {args.speed}, cutting height: {args.cutting_height}in "
                   f"({blade_height_mm(args.cutting_height)}mm), angle: {args.mowing_angle}°")
+            if args.start_progress:
+                print(f"  start progress: {args.start_progress}%")
         try:
             resolved = await self.start_mowing(
                 args.device, args.areas,
@@ -942,6 +949,7 @@ class MammotionCLI(Mammotion):
                 mow_order=args.mow_order,
                 mowing_angle=args.mowing_angle,
                 speed=args.speed,
+                start_progress=args.start_progress,
             )
         except MammotionError as e:
             self._error(f"error: {e}")
@@ -1221,6 +1229,7 @@ def main():
     start_parser.add_argument('--mow-order', type=str, default='grid-first', choices=['perimeter-first', 'grid-first'], help='mowing order: perimeter-first=border then zigzag, grid-first=zigzag then border (default)')
     start_parser.add_argument('--mowing-angle', type=int, default=0, help='mowing angle in degrees (0-359), controls direction of mowing lines, default: 0 (east/west)')
     start_parser.add_argument('--speed', type=float, default=0.25, help='mowing speed: 0.0 (slow) to 1.0 (fast), default: 0.25')
+    start_parser.add_argument('--start-progress', type=int, default=0, help="begin the route at this percent (0-99), like the app's start progress, to resume a stopped job with the same settings; default: 0")
     start_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_start(args))
 
     # pause command

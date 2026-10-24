@@ -75,6 +75,7 @@ uv run --script mammotion.py start --device Luba-XXXXXX \
 | `--mow-order` | grid-first | grid-first, perimeter-first |
 | `--mowing-angle` | 0 | 0–359 degrees (base direction) |
 | `--speed` | 0.25 | 0.0–1.0 normalized speed |
+| `--start-progress` | 0 | 0–99 percent; start part-way to resume a stopped job with identical settings |
 
 Zigzag is a single-pass line pattern; chessboard uses perpendicular passes with **fixed 90° included angle**. Perimeter is border-only; adaptive is the upstream adaptive pattern. Route configuration uses upstream `OperationSettings` / `build_route_information` for model flags; do not improvise route bytes or manual blade commands.
 

@@ -106,6 +106,7 @@ uv run --script mammotion.py start --device Luba-ABC123 --areas front-yard \
 | `--pattern` | zigzag | `zigzag`, `chessboard`, `perimeter`, or `adaptive` |
 | `--path-spacing` | 10.0 | Inches, 7.9–13.8 |
 | `--mowing-angle` | 0 | Base mowing angle, 0–359 degrees |
+| `--start-progress` | 0 | Begin the route at this percent (0–99), like the app's start progress; resumes a stopped job when every other setting is the same |
 
 Route configuration uses upstream `OperationSettings` / `build_route_information` for model-specific path flags. Chessboard uses a fixed **90° included angle** between passes; `--mowing-angle` sets the base direction, not that included angle.
 
