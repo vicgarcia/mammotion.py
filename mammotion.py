@@ -2,8 +2,8 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
-#     "pymammotion==0.10.7",
-#     "orjson==3.12.0",
+#     "pymammotion==0.10.12",
+#     "orjson==3.13.0",
 #     "betterproto2==0.10.0",
 #     "packaging==26.3",  # PyMammotion imports this but omits it from Requires-Dist.
 # ]
@@ -11,6 +11,7 @@
 
 import argparse
 import asyncio
+import gc
 import logging
 import math
 import os
@@ -28,7 +29,7 @@ from pymammotion.utility.device_type import DeviceType
 from pymammotion.data.model.device_config import OperationSettings, build_route_information
 from pymammotion.data.model.hash_list import AreaHashNameList, Plan
 from pymammotion.messaging.command_queue import Priority
-from pymammotion.transport.base import TransportType
+from pymammotion.transport.base import ReLoginRequiredError, SessionExpiredError, TransportType
 
 # setup logging
 logging.basicConfig(level=logging.WARNING)
@@ -214,13 +215,21 @@ class MammotionCLI:
     # === login ===
 
     async def login(self, email: str, password: str, use_cache: bool = True) -> bool:
-        """Restore credentials; upstream alone decides whether a password grant is needed."""
+        """Restore credentials, with one password grant only when a cached token is rejected."""
         self._authenticated = False
         try:
             cache = self._load_cache() if use_cache else None
             self._restoring_cache = cache
             if cache:
-                await self._client.restore_credentials(email, password, cache)
+                try:
+                    await self._client.restore_credentials(email, password, cache)
+                except (SessionExpiredError, ReLoginRequiredError) as e:
+                    # An expired cached token is an auth rejection, not a network fault.
+                    # Upstream CloudIOTGateway.from_cache raises on an expired Aliyun
+                    # refresh token (2460) instead of rebuilding from the valid login.
+                    logger.warning("cached session rejected (%s); logging in again", e)
+                    self._restoring_cache = None
+                    await self._client.login_and_initiate_cloud(email, password)
             else:
                 await self._client.login_and_initiate_cloud(email, password)
             self._authenticated = True
@@ -416,6 +425,10 @@ class MammotionCLI:
             await self._client.stop()
         except Exception:
             pass
+        # Finalize orphaned paho clients (e.g. a session replaced by re-login) while the
+        # loop is open; their __del__ schedules a callback that fails on a closed loop.
+        gc.collect()
+        await asyncio.sleep(0)
 
     # === command handlers ===
 
@@ -802,6 +815,7 @@ class MammotionCLI:
 
                 for idx, (plan_id, plan) in enumerate(plans.items(), 1):
                     print(f"\n  [{idx}/{len(plans)}] Schedule: {plan.task_name or plan.job_name or plan_id}")
+                    print(f"  Enabled:     {'yes' if plan.is_enabled() else 'no'}")
 
                     if plan.start_time:
                         print(f"  Start time:  {plan.start_time}")
@@ -1128,6 +1142,9 @@ def main():
     reports_parser.set_defaults(func=lambda ctl: lambda args: ctl.cmd_reports(args))
 
     args = parser.parse_args()
+
+    # Output contains °, ² and similar; Windows pipes otherwise default to cp1252.
+    sys.stdout.reconfigure(encoding='utf-8')
 
     if not args.command:
         parser.print_help()

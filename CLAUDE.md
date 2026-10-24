@@ -4,7 +4,7 @@
 
 All CLI logic lives in the single-file PEP 723 script `mammotion.py`; Python **3.14+** is required. `MammotionCLI` wraps upstream `MammotionClient` from `pymammotion.client`.
 
-Inline dependencies are exact: **`pymammotion==0.10.7`**, **`orjson==3.12.0`**, **`betterproto2==0.10.0`**. **`packaging==26.3`** is also required explicitly: PyMammotion imports `packaging.version` in `transport/cloud.py` but omits it from its published dependencies. A clean environment fails without it. Private API assumptions below are tied to this pinned upstream version; review them on upgrades.
+Inline dependencies are exact: **`pymammotion==0.10.12`**, **`orjson==3.13.0`**, **`betterproto2==0.10.0`**. **`packaging==26.3`** is also required explicitly: PyMammotion imports `packaging.version` in `transport/cloud.py` but omits it from its published dependencies. A clean environment fails without it. Private API assumptions below are tied to this pinned upstream version; review them on upgrades.
 
 Run the script without a lockfile:
 
@@ -20,13 +20,13 @@ Global pi skill: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
 The CLI passes `asyncio.SelectorEventLoop` as `asyncio.run(..., loop_factory=...)` on Windows. aiomqtt uses socket reader/writer callbacks, which the default Windows Proactor loop does not support (including `remove_writer` during paho cleanup). Keep other platforms on the default loop and avoid deprecated global event-loop policy overrides. Offline tests exercise aiomqtt socket cleanup without connecting to a broker.
 
-## Upstream 0.10.7 facts
+## Upstream 0.10.12 facts
 
 The client manages cloud sessions, device handles, brokers, command queues, reducers and MQTT transports. Do not revive the old `MammotionBaseCloudDevice` / `MammotionCloud` / `AliyunMQTT` architecture or manually connect/disconnect for each command.
 
 ### HTTP header
 
-`MammotionClient(ha_version="0.5.7")` retains the CLI's integration header configuration. In 0.10.7, `MammotionHTTP` formats `App-Version` as `HA,2.{ha_version}` when supplied, and **`NOT HA,{APP_VERSION}`** otherwise. The old claim that omitting `ha_version` produces `ALIYUN DEMO,...` and necessarily causes a 403 is outdated; that value is a commented-out legacy alternative, not the current default.
+`MammotionClient(ha_version="0.5.7")` retains the CLI's integration header configuration. In 0.10.12, `MammotionHTTP` formats `App-Version` as `HA,2.{ha_version}` when supplied, and **`NOT HA,{APP_VERSION}`** otherwise. The old claim that omitting `ha_version` produces `ALIYUN DEMO,...` and necessarily causes a 403 is outdated; that value is a commented-out legacy alternative, not the current default.
 
 ### Commands and priority
 
@@ -50,6 +50,8 @@ Transport completion or a matching response is not proof the requested action co
 
 - Login/credential restoration can finish before MQTT is usable. Wait for the **selected device's usable transport**; an unrelated device or account connection is insufficient. Metadata-only device listing and RTK status do not require mower telemetry.
 - An MQTT readiness timeout is a connection failure, **not** a reason to force login. Preserve cached credentials on transient/network failure; distinguish actual authentication rejection from connectivity errors.
+- `login()` falls back to exactly one `login_and_initiate_cloud` when `restore_credentials` raises `SessionExpiredError` / `ReLoginRequiredError`, clearing `_restoring_cache` first so stale blocks are not merged into the new cache. This works around an upstream bug (present in 0.10.7–0.10.12): `CloudIOTGateway.from_cache` documents returning `None` on a failed session refresh but calls `check_or_refresh_session()` outside its `try`, so an expired Aliyun refresh token (code 2460) escapes `restore_credentials` instead of triggering upstream's rebuild-from-HTTP-login path. Any other restore exception (network, `LoginFailedError`) still fails without a password grant. Re-check whether the workaround is still needed on upgrades.
+- `stop()` runs `gc.collect()` after `client.stop()` so paho clients orphaned by a replaced session are finalized while the loop is open; otherwise their `__del__` prints an `Event loop is closed` traceback at exit.
 - `get_device_state()` requests fresh telemetry through `client.refresh_status` and a temporary pinned **`handle._reducer.apply`** hook. Only newly applied `toapp_report_data` packets containing `dev` can satisfy status predicates. RTK/work-only packets retain old status and must not count; unchanged fresh dev reports must count even when no state-change event fires. Restore the hook in `finally`. Review this private API on upgrades.
 - Cache: `~/.mammotion.json`, sensitive reusable credentials. Register the async `client.on_credentials_updated` callback to serialize `client.to_cache()` after refreshes; save the latest credentials again on shutdown after successful login, before closing the client. During restoration, merge rotated login tokens into the original cache so an early callback cannot discard not-yet-restored Aliyun/device blocks. Do not discard a good cache just because network restoration failed.
 - Mobile apps and other integrations share cloud account/session resources. Concurrent clients may contend for sessions or alter device state between checks. Avoid forced login loops and never infer target readiness from successful authentication.
@@ -76,7 +78,7 @@ Height conversion remains `round(inches * 25.4 / 5) * 5`, clamped to [55, 100] m
 
 ### Correct saga and sync facts
 
-The CLI uses direct route request/response rather than fetching all cover paths for start. This is a deliberate limited workflow, **not** a workaround for the former claimed `MowPathSaga` constructor bug: in 0.10.7 `_route_val = route_info if skip_planning else None`. Ordinary planning with `route_info` does plan the route; `skip_planning=True` is for fetching an already-running job's known path.
+The CLI uses direct route request/response rather than fetching all cover paths for start. This is a deliberate limited workflow, **not** a workaround for the former claimed `MowPathSaga` constructor bug: in 0.10.12 `_route_val = route_info if skip_planning else None`. Ordinary planning with `route_info` does plan the route; `skip_planning=True` is for fetching an already-running job's known path.
 
 `MapFetchSaga` fetches the full map, with area names skipped for Luba 1 and multi-frame hash/data acknowledgement handling. Do not repeat the old blanket claim that it always has a five-minute timeout or never exits cleanly. Full-map fetching is unnecessary for this CLI's supported area-name shortcut; Luba 1 needs a different model-specific workflow that is not implemented here.
 

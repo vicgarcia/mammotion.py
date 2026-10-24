@@ -8,7 +8,7 @@ compatibility: Requires Python 3.14+, uv, mammotion.py, and MAMMOTION_EMAIL/MAMM
 
 Global skill location: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
-Use the single-file CLI with PyMammotion **0.10.7**, explicit `orjson==3.12.0` and `betterproto2==0.10.0`, with pinned direct dependencies and no required lockfile. `packaging==26.3` is explicit because PyMammotion imports it without declaring it.
+Use the single-file CLI with PyMammotion **0.10.12**, explicit `orjson==3.13.0` and `betterproto2==0.10.0`, with pinned direct dependencies and no required lockfile. `packaging==26.3` is explicit because PyMammotion imports it without declaring it.
 
 ## Safety and capability boundaries
 
@@ -40,7 +40,7 @@ Exact inline pins do not upgrade themselves. Transitive versions may change on f
 
 Credentials come from `MAMMOTION_EMAIL` and `MAMMOTION_PASSWORD`, or global `-e EMAIL -p PASSWORD` arguments. Prefer environment variables; never expose passwords or the sensitive `~/.mammotion.json` cache in logs/responses.
 
-The cache is saved via the credentials-update callback and on shutdown. Network failure preserves it; MQTT timeout does not force a fresh login. Authentication rejection is distinct from connection failure. Do not delete the cache or repeatedly log in as a generic connectivity remedy.
+The cache is saved via the credentials-update callback and on shutdown. An expired cached token triggers one automatic fresh login; network failure preserves the cache; MQTT timeout does not force a fresh login. Authentication rejection is distinct from connection failure. Do not delete the cache or repeatedly log in as a generic connectivity remedy.
 
 Mobile apps and other integrations share cloud account/session resources. Concurrent clients may contend for sessions, interrupt MQTT or change state between checks. Avoid competing control and repeated logins. Target-device readiness, not merely account login or another device's connection, is required.
 

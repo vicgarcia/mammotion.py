@@ -1,11 +1,11 @@
 # mammotion.py
 
-Single-file Python CLI for Mammotion cloud devices, built on [PyMammotion](https://github.com/mikey0000/PyMammotion) **0.10.7**.
+Single-file Python CLI for Mammotion cloud devices, built on [PyMammotion](https://github.com/mikey0000/PyMammotion) **0.10.12**.
 
 ## Requirements and installation
 
 - Python 3.14+, [uv](https://github.com/astral-sh/uv), and a Mammotion account with registered devices.
-- Inline dependencies: `pymammotion==0.10.7`, `orjson==3.12.0`, `betterproto2==0.10.0`. Also `packaging==26.3`: PyMammotion imports it but omits it from its dependency metadata.
+- Inline dependencies: `pymammotion==0.10.12`, `orjson==3.13.0`, `betterproto2==0.10.0`. Also `packaging==26.3`: PyMammotion imports it but omits it from its dependency metadata.
 - Direct dependencies remain pinned; uv resolves transitive dependencies without a lockfile.
 
 ```bash
@@ -52,7 +52,7 @@ export MAMMOTION_PASSWORD="yourpass"
 
 Alternatively pass `-e EMAIL -p PASSWORD` before the command (arguments may be visible in process listings/history). Treat `~/.mammotion.json` as sensitive: it stores reusable session credentials. Credential-update callbacks persist refreshed credentials, and shutdown saves the latest cache.
 
-Cached sessions are restored where possible. Authentication rejection may require a fresh login, but a network failure preserves the cache. An MQTT readiness timeout does **not** trigger a forced login or imply expired credentials.
+Cached sessions are restored where possible. If a cached token has expired (e.g. the cache sat unused for a few weeks), the CLI performs one fresh login and rewrites the cache; a network failure preserves the cache without logging in again. An MQTT readiness timeout does **not** trigger a forced login or imply expired credentials.
 
 The CLI and mobile app/other integrations share cloud account/session resources. Concurrent clients can contend for sessions, disrupt MQTT, or change device state between checks. Avoid concurrent control and repeated logins; a successful login does not prove the target mower is connected.
 
@@ -120,7 +120,7 @@ uv run --script mammotion.py cancel --device Luba-ABC123
 
 ```bash
 uv run --script mammotion.py --help
-uv run --no-project --python 3.14 --with pymammotion==0.10.7 --with orjson==3.12.0 --with betterproto2==0.10.0 --with packaging==26.3 \
+uv run --no-project --python 3.14 --with pymammotion==0.10.12 --with orjson==3.13.0 --with betterproto2==0.10.0 --with packaging==26.3 \
   python -m unittest discover -s tests -v
 ```
 

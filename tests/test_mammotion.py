@@ -110,6 +110,31 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                 cli._client.login_and_initiate_cloud.assert_not_awaited()
                 save.assert_not_called()
 
+    async def test_rejected_cached_token_falls_back_to_one_fresh_login(self):
+        errors = (app.SessionExpiredError(app.TransportType.CLOUD_ALIYUN, "refreshToken expired"),
+                  app.ReLoginRequiredError("email", "refresh failed"))
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                cli = make_cli()
+                cli._client.restore_credentials.side_effect = error
+                with patch.object(cli, "_load_cache", return_value={"token": "cached"}), \
+                        patch.object(cli, "_save_cache") as save:
+                    self.assertTrue(await cli.login("email", "password"))
+                cli._client.login_and_initiate_cloud.assert_awaited_once_with("email", "password")
+                # The stale cache must not be merged into the fresh login's cache.
+                self.assertIsNone(cli._restoring_cache)
+                save.assert_called_once()
+
+    async def test_rejected_cached_token_fallback_failure_returns_false(self):
+        self.cli._client.restore_credentials.side_effect = app.SessionExpiredError(
+            app.TransportType.CLOUD_ALIYUN, "refreshToken expired")
+        self.cli._client.login_and_initiate_cloud.side_effect = RuntimeError("denied")
+        with patch.object(self.cli, "_load_cache", return_value={"token": "cached"}), \
+                patch.object(self.cli, "_save_cache") as save:
+            self.assertFalse(await self.cli.login("email", "password"))
+        self.cli._client.login_and_initiate_cloud.assert_awaited_once()
+        save.assert_not_called()
+
     async def test_fresh_login_only_when_cache_missing_or_disabled(self):
         for use_cache, cache in ((True, None), (False, {"token": "cached"})):
             with self.subTest(use_cache=use_cache):
