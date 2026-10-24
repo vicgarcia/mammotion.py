@@ -2,7 +2,14 @@
 
 ## Runtime and dependency contract
 
-All CLI logic lives in the single-file PEP 723 script `mammotion.py`; Python **3.14+** is required. `MammotionCLI` wraps upstream `MammotionClient` from `pymammotion.client`.
+All logic lives in the single-file PEP 723 script `mammotion.py`; Python **3.14+** is required. The file is dual use — CLI/agent skill and importable library — with one codebase:
+
+- `Mammotion` (library core) wraps upstream `MammotionClient` from `pymammotion.client`. Methods return data and raise `MammotionError` (a `RuntimeError`); they never print or set exit codes. It is an async context manager (`login` on enter, `stop` on exit, `stop` also after a failed login). Credentials default to `MAMMOTION_EMAIL`/`MAMMOTION_PASSWORD`.
+- Every mower method calls `_require_mower`: rejects RTK and unknown devices, then waits for the device's transport once per session (`_ready_devices`). A readiness timeout raises; it never triggers a login.
+- `MammotionCLI(Mammotion)` only formats output and maps `MammotionError` to exit code 1. Keep all safety logic (validation, fresh-state preconditions, confirmation, no retries) in `Mammotion`, never in `cmd_*`.
+- `run_async(coro)` is `asyncio.run` with the Windows selector loop; library callers should use it too.
+- Importing must stay side-effect free apart from quieting third-party loggers: `logging.basicConfig` and stdout reconfiguration happen in `main()`. `AUTH_CACHE_FILE` is read from `MAMMOTION_CACHE_DIR` at import time.
+- Library consumers (e.g. groundskeeper) vendor a verbatim copy of this file and copy its `# /// script` pins into their own script block, since uv installs only the entry script's dependencies. Treat public method names and return shapes (`get_device_state` dict, `get_reports` raw dicts, `start_mowing` resolved areas) as an API.
 
 Inline dependencies are exact: **`pymammotion==0.10.12`**, **`orjson==3.13.0`**, **`betterproto2==0.10.0`**. **`packaging==26.3`** is also required explicitly: PyMammotion imports `packaging.version` in `transport/cloud.py` but omits it from its published dependencies. A clean environment fails without it. Private API assumptions below are tied to this pinned upstream version; review them on upgrades.
 
@@ -18,7 +25,7 @@ Global pi skill: `~/.pi/agent/skills/mammotion/SKILL.md`.
 
 ## Windows event loop
 
-The CLI passes `asyncio.SelectorEventLoop` as `asyncio.run(..., loop_factory=...)` on Windows. aiomqtt uses socket reader/writer callbacks, which the default Windows Proactor loop does not support (including `remove_writer` during paho cleanup). Keep other platforms on the default loop and avoid deprecated global event-loop policy overrides. Offline tests exercise aiomqtt socket cleanup without connecting to a broker.
+`run_async` passes `asyncio.SelectorEventLoop` as `asyncio.run(..., loop_factory=...)` on Windows. aiomqtt uses socket reader/writer callbacks, which the default Windows Proactor loop does not support (including `remove_writer` during paho cleanup). Keep other platforms on the default loop and avoid deprecated global event-loop policy overrides. Offline tests exercise aiomqtt socket cleanup without connecting to a broker.
 
 ## Upstream 0.10.12 facts
 

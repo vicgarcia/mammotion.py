@@ -1,4 +1,4 @@
-"""Offline regression tests for the standalone CLI (no login or mower traffic)."""
+"""Offline regression tests for the CLI and library API (no login or mower traffic)."""
 
 import asyncio
 import importlib.util
@@ -39,6 +39,9 @@ def make_cli():
     cli.exit_code = 0
     cli._authenticated = False
     cli._restoring_cache = None
+    cli._email = cli._password = None
+    cli._use_cache = True
+    cli._ready_devices = {DEVICE}
     cli._client = Mock()
     for name in ("restore_credentials", "login_and_initiate_cloud", "stop",
                  "refresh_status", "wait_for", "send_command_with_args",
@@ -94,7 +97,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         cache = {"token": "cached"}
         with patch.object(self.cli, "_load_cache", return_value=cache), \
                 patch.object(self.cli, "_save_cache") as save:
-            self.assertTrue(await self.cli.login("email", "password"))
+            await self.cli.login("email", "password")
         self.cli._client.restore_credentials.assert_awaited_once_with("email", "password", cache)
         self.cli._client.login_and_initiate_cloud.assert_not_awaited()
         save.assert_called_once()
@@ -106,7 +109,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                 cli._client.restore_credentials.side_effect = error
                 with patch.object(cli, "_load_cache", return_value={"token": "cached"}), \
                         patch.object(cli, "_save_cache") as save:
-                    self.assertFalse(await cli.login("email", "password"))
+                    with self.assertRaises(app.MammotionError):
+                        await cli.login("email", "password")
                 cli._client.login_and_initiate_cloud.assert_not_awaited()
                 save.assert_not_called()
 
@@ -119,7 +123,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                 cli._client.restore_credentials.side_effect = error
                 with patch.object(cli, "_load_cache", return_value={"token": "cached"}), \
                         patch.object(cli, "_save_cache") as save:
-                    self.assertTrue(await cli.login("email", "password"))
+                    await cli.login("email", "password")
                 cli._client.login_and_initiate_cloud.assert_awaited_once_with("email", "password")
                 # The stale cache must not be merged into the fresh login's cache.
                 self.assertIsNone(cli._restoring_cache)
@@ -131,7 +135,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.cli._client.login_and_initiate_cloud.side_effect = RuntimeError("denied")
         with patch.object(self.cli, "_load_cache", return_value={"token": "cached"}), \
                 patch.object(self.cli, "_save_cache") as save:
-            self.assertFalse(await self.cli.login("email", "password"))
+            with self.assertRaises(app.MammotionError):
+                await self.cli.login("email", "password")
         self.cli._client.login_and_initiate_cloud.assert_awaited_once()
         save.assert_not_called()
 
@@ -141,7 +146,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                 cli = make_cli()
                 with patch.object(cli, "_load_cache", return_value=cache) as load, \
                         patch.object(cli, "_save_cache"):
-                    self.assertTrue(await cli.login("email", "password", use_cache=use_cache))
+                    await cli.login("email", "password", use_cache=use_cache)
                 cli._client.restore_credentials.assert_not_awaited()
                 cli._client.login_and_initiate_cloud.assert_awaited_once_with("email", "password")
                 if not use_cache:
@@ -150,7 +155,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_login_failure_returns_false(self):
         self.cli._client.login_and_initiate_cloud.side_effect = RuntimeError("denied")
         with patch.object(self.cli, "_load_cache", return_value=None):
-            self.assertFalse(await self.cli.login("email", "password"))
+            with self.assertRaisesRegex(app.MammotionError, "cache preserved"):
+                await self.cli.login("email", "password")
 
     async def test_readiness_uses_selected_handle_and_settles(self):
         with patch.object(app.asyncio, "sleep", new_callable=AsyncMock) as sleep:
@@ -183,6 +189,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
             cache.write_text('{"token":"preserve"}', encoding="utf-8")
             self.cli.login = AsyncMock(return_value=True)
             self.cli.stop = AsyncMock()
+            self.cli._ready_devices = set()
             self.cli._wait_for_connection = AsyncMock(return_value=False)
             handler = AsyncMock()
             args = NS(email="email", password="password", no_cache=False,
@@ -289,7 +296,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_state_timeout_does_not_return_cached_state(self):
         self.cli._wait_for_fresh_status = AsyncMock(side_effect=TimeoutError("no fresh state"))
-        self.assertIsNone(await self.cli.get_device_state(DEVICE))
+        with self.assertRaisesRegex(app.MammotionError, "failed to get fresh device status"):
+            await self.cli.get_device_state(DEVICE)
         call = self.cli._wait_for_fresh_status.await_args
         predicate = call.args[1]
         self.assertFalse(predicate(device_state(0)))
@@ -462,7 +470,7 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                 cli._client.send_command_with_args.assert_not_awaited()
 
     async def test_missing_state_is_nonzero(self):
-        self.cli.get_device_state = AsyncMock(return_value=None)
+        self.cli.get_device_state = AsyncMock(side_effect=app.MammotionError("no fresh state"))
         self.cli._send_action = AsyncMock()
         await self.cli.cmd_pause(NS(device=DEVICE))
         self.assertEqual(self.cli.exit_code, 1)
@@ -618,9 +626,10 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cli.exit_code, 0)
 
     async def test_status_json_failure_prints_no_json(self):
-        self.cli.get_device_state = AsyncMock(return_value=None)
+        self.cli.get_device_state = AsyncMock(side_effect=app.MammotionError("no fresh state"))
         await self.cli.cmd_status(NS(device=DEVICE, json=True))
         self.assertNotIn("{", self.output.getvalue())
+        self.assertEqual(self.cli.exit_code, 1)
 
     async def test_reports_json_prints_collected_reports(self):
         from pymammotion.proto import LubaMsg, MctlNav, WorkReportInfoAck
@@ -662,7 +671,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
             cache_file = Path(tmp) / "auth.json"
             cache_file.write_bytes(app.orjson.dumps(previous))
             with patch.object(app, "AUTH_CACHE_FILE", cache_file):
-                self.assertFalse(await self.cli.login("email", "password"))
+                with self.assertRaises(app.MammotionError):
+                    await self.cli.login("email", "password")
                 saved = app.orjson.loads(cache_file.read_bytes())
                 self.assertEqual(saved, {**previous, **rotated})
                 self.assertFalse(self.cli._authenticated)
@@ -678,7 +688,8 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.cli._client.to_cache.return_value = {"partial": "must not replace cache"}
         with patch.object(self.cli, "_load_cache", return_value={"token": "good"}), \
                 patch.object(self.cli, "_save_cache") as save:
-            self.assertFalse(await self.cli.login("email", "password"))
+            with self.assertRaises(app.MammotionError):
+                await self.cli.login("email", "password")
             await self.cli.stop()
         save.assert_not_called()
         self.cli._client.stop.assert_awaited_once()
@@ -693,9 +704,73 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_area_timeout_does_not_return_cached_names(self):
         self.cli._client.send_command_and_wait.side_effect = TimeoutError("no areas reply")
-        self.assertEqual(await self.cli.get_area_list(DEVICE), [])
+        with self.assertRaises(app.MammotionError):
+            await self.cli.get_area_list(DEVICE)
+        await self.cli.cmd_areas(NS(device=DEVICE))
         self.assertEqual(self.cli.exit_code, 1)
+        self.assertNotIn("Areas for", self.output.getvalue())
         self.cli._client.get_device_by_name.assert_not_called()
+
+    async def test_library_start_returns_resolved_areas_and_rejects_unknown_area(self):
+        self.cli.get_device_state = AsyncMock(return_value={"status": 15, "status_name": "charging"})
+        self.cli.get_area_list = AsyncMock(return_value=[NS(name="Front", hash=123), NS(name="Back", hash=456)])
+        self.cli._send_action = AsyncMock()
+        resolved = await self.cli.start_mowing(DEVICE, ["Back"], mowing_angle=90, cutting_height=2.6)
+        self.assertEqual([a.hash for a in resolved], [456])
+        route = self.cli._client.send_command_and_wait.await_args.kwargs["generate_route_information"]
+        self.assertEqual((route.toward, route.blade_height), (90, 65))
+        with self.assertRaisesRegex(app.MammotionError, "available areas: Front, Back"):
+            await self.cli.start_mowing(DEVICE, ["Side"])
+        self.assertEqual(self.cli._send_action.await_count, 1)
+        self.assertEqual(self.output.getvalue(), "", "library calls must not print")
+
+    async def test_library_rejects_invalid_pattern_and_order_before_mower_traffic(self):
+        for kwargs in ({"pattern": "spiral"}, {"mow_order": "sideways"}, {"speed": 2.0}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(app.MammotionError):
+                    await self.cli.start_mowing(DEVICE, ["Front"], **kwargs)
+        self.cli._client.send_command_and_wait.assert_not_awaited()
+
+    async def test_mower_methods_reject_rtk_and_unknown_devices(self):
+        with self.assertRaisesRegex(app.MammotionError, "RTK"):
+            await self.cli.get_device_state("RTK-test")
+        self.cli._client.mower.return_value = None
+        with self.assertRaisesRegex(app.MammotionError, "device not found"):
+            await self.cli.get_reports("Luba-VS-missing")
+
+    async def test_readiness_is_awaited_once_per_device(self):
+        self.cli._ready_devices = set()
+        self.cli._wait_for_connection = AsyncMock(return_value=True)
+        self.cli._wait_for_fresh_status = AsyncMock(return_value=device_state(11))
+        await self.cli.get_device_state(DEVICE)
+        await self.cli.get_device_state(DEVICE)
+        self.cli._wait_for_connection.assert_awaited_once_with(DEVICE)
+
+    async def test_readiness_timeout_raises_without_relogin_or_status_request(self):
+        self.cli._ready_devices = set()
+        self.cli._wait_for_connection = AsyncMock(return_value=False)
+        self.cli._wait_for_fresh_status = AsyncMock()
+        with self.assertRaisesRegex(app.MammotionError, "cache preserved"):
+            await self.cli.get_device_state(DEVICE)
+        self.cli._client.login_and_initiate_cloud.assert_not_awaited()
+        self.cli._wait_for_fresh_status.assert_not_awaited()
+
+    async def test_context_manager_logs_in_and_always_stops(self):
+        for login_error in (None, app.MammotionError("denied")):
+            with self.subTest(login_error=login_error):
+                with patch.object(app, "MammotionClient", return_value=Mock()):
+                    mower = app.Mammotion("email", "password", use_cache=False)
+                mower.login = AsyncMock(side_effect=login_error)
+                mower.stop = AsyncMock()
+                if login_error:
+                    with self.assertRaises(app.MammotionError):
+                        async with mower:
+                            self.fail("body must not run after a failed login")
+                else:
+                    async with mower as entered:
+                        self.assertIs(entered, mower)
+                mower.login.assert_awaited_once_with("email", "password", use_cache=False)
+                mower.stop.assert_awaited_once()
 
     async def test_stop_saves_cache_before_client_shutdown(self):
         self.cli._authenticated = True

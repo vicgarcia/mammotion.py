@@ -118,6 +118,38 @@ uv run --script mammotion.py return --device Luba-ABC123
 uv run --script mammotion.py cancel --device Luba-ABC123
 ```
 
+## Library use
+
+The same file imports as a Python module, for scripts that should not shell out to the CLI. Copy `mammotion.py` next to your code and add its inline dependencies (`pymammotion`, `orjson`, `betterproto2`, `packaging` pins) to your own:
+
+```python
+from mammotion import Mammotion, MammotionError, run_async
+
+async def mow_if_docked(device):
+    # credentials default to MAMMOTION_EMAIL / MAMMOTION_PASSWORD
+    async with Mammotion() as mower:
+        state = await mower.get_device_state(device)        # always fresh telemetry
+        if state["docked"] and state["battery"] >= 90:
+            await mower.start_mowing(device, ["front-yard"], mowing_angle=90, cutting_height=2.6)
+
+try:
+    run_async(mow_if_docked("Luba-ABC123"))
+except MammotionError as e:
+    print(f"not started: {e}")
+```
+
+| Method | Returns |
+|--------|---------|
+| `get_devices()` | account devices (no mower traffic) |
+| `get_device_state(device)` | fresh state dict (same fields as `status --json`) |
+| `get_area_list(device)` | `AreaHashNameList` items |
+| `start_mowing(device, areas, *, pattern, cutting_height, path_spacing, perimeter_laps, mow_order, mowing_angle, speed)` | resolved areas, once a fresh WORKING report confirms |
+| `pause` / `resume` / `return_to_dock` / `cancel(device)` | `None`, once the new state is confirmed |
+| `get_schedules(device)` | `Plan` objects |
+| `get_reports(device, count=10, today_only=False)` | raw report dicts, newest first (same as `reports --json`) |
+
+Every failure, rejection or unconfirmed outcome raises `MammotionError`; nothing prints. The same safety limits apply as for the CLI: never retry an unconfirmed start blindly, and none of these is an emergency stop.
+
 ## Offline regression tests
 
 ```bash
