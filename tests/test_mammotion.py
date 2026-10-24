@@ -652,6 +652,38 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reports[0]["start_work_time"], 1_760_000_000)
         self.assertEqual(self.cli.exit_code, 0)
 
+    async def test_reports_finish_when_announced_total_arrives(self):
+        from pymammotion.proto import LubaMsg, MctlNav, WorkReportInfoAck, WorkReportUpdateAck
+        reducer = self.cli._client.mower.return_value._reducer
+        session = NS(interrupt_flag=False, start_work_time=1_760_000_000, end_work_time=1_760_016_000,
+                     work_time_used=16_000, work_area=660.0, work_progress=100, height_of_knife=65,
+                     work_type=2, work_result=5)
+        reducer.apply = Mock(return_value=NS(work_session_result=session))
+
+        async def send(_device, command, **_kwargs):
+            if command == "query_job_history":
+                reducer.apply(None, LubaMsg(nav=MctlNav(toapp_work_report_update_ack=WorkReportUpdateAck())))
+            elif command == "request_job_history":
+                # asked for 5, the mower announces and sends only 2
+                for n in (1, 2):
+                    reducer.apply(None, LubaMsg(nav=MctlNav(toapp_work_report_ack=WorkReportInfoAck(
+                        total_ack_num=2, current_ack_num=n))))
+
+        self.cli._client.send_command_with_args.side_effect = send
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        reports = await self.cli.get_reports(DEVICE, 5)
+        self.assertEqual(len(reports), 2)
+        self.assertLess(loop.time() - started, 1.0, "must not wait for the query timeout or the idle fallback")
+
+    def test_report_times_split_elapsed_into_mowing_and_charging(self):
+        report = {"start_work_time": 1_000, "end_work_time": 1_000 + 6 * 3600 + 23 * 60, "work_time_used": 16_378}
+        elapsed, mowing, other = app.report_times(report)
+        self.assertEqual((elapsed, mowing, other), (22_980, 16_378, 6_602))
+        self.assertEqual(app.format_duration(other), "1h 50m")
+        self.assertEqual(app.report_times({"start_work_time": 1_000, "end_work_time": 0, "work_time_used": 600}),
+                         (0, 600, 0))
+
     async def test_report_labels_follow_upstream_app_enums(self):
         # work_type is how the job was launched (2 = PLAN), not a border/grid mow order
         self.assertEqual(app.WORK_TYPE_NAMES[2], "task / schedule")

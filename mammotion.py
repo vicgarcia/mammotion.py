@@ -174,6 +174,23 @@ def blade_height_mm(inches: float) -> int:
     return max(55, min(100, round(inches * MM_PER_INCH / 5) * 5))
 
 
+def report_times(report: dict[str, Any]) -> tuple[int, int, int]:
+    """(elapsed, mowing, other) seconds for a report.
+
+    Elapsed is start to end on the clock; mowing is the mower's own work time;
+    other is the remainder — mid-job recharging plus any pauses. Elapsed is 0
+    when the report has no end time.
+    """
+    start, end = report.get('start_work_time', 0), report.get('end_work_time', 0)
+    mowing = max(0, report.get('work_time_used', 0))
+    elapsed = end - start if start > 0 and end > start else 0
+    return elapsed, mowing, max(0, elapsed - mowing) if elapsed else 0
+
+
+def format_duration(seconds: int) -> str:
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
 def run_async(coroutine):
     """asyncio.run with the event loop aiomqtt needs on every platform.
 
@@ -687,6 +704,9 @@ class Mammotion:
         handle = self._client.mower(device_name)
         work_reports: list[dict] = []
         original_apply = handle._reducer.apply
+        query_acked = asyncio.Event()
+        all_received = asyncio.Event()
+        announced = 0  # total_ack_num: how many records the mower says it is sending
 
         # wrap the reducer's apply() to intercept work report messages before
         # they're deep-copied and overwrite the previous record — this is the
@@ -694,12 +714,15 @@ class Mammotion:
         # on every toapp_work_report_ack, making subclassing useless
         def _patched_apply(current, message):
             import betterproto2
-            nav_msg_name = ""
+            nonlocal announced
+            nav_msg_name, nav_msg = "", None
             res = betterproto2.which_one_of(message, "LubaSubMsg")
             if res[0] == "nav":
-                nav_msg_name = betterproto2.which_one_of(message.nav, "SubNavMsg")[0]
+                nav_msg_name, nav_msg = betterproto2.which_one_of(message.nav, "SubNavMsg")
             result = original_apply(current, message)
-            if nav_msg_name in ("toapp_work_report_ack", "toapp_work_report_upload"):
+            if nav_msg_name == "toapp_work_report_update_ack":
+                query_acked.set()
+            elif nav_msg_name in ("toapp_work_report_ack", "toapp_work_report_upload"):
                 r = result.work_session_result
                 if r.start_work_time > 0:
                     work_reports.append({
@@ -713,23 +736,34 @@ class Mammotion:
                         'work_type': r.work_type,
                         'work_result': r.work_result,
                     })
+                announced = max(announced, getattr(nav_msg, 'total_ack_num', 0) or 0)
+                if len(work_reports) >= (min(count, announced) if announced else count):
+                    all_received.set()
             return result
 
         handle._reducer.apply = _patched_apply
         try:
             await self._client.send_command_with_args(device_name, "query_job_history", priority=Priority.USER)
-            await asyncio.sleep(2)
+            # the mower acks the history query before it will answer a request
+            try:
+                await asyncio.wait_for(query_acked.wait(), timeout=2)
+            except TimeoutError:
+                pass
             await self._client.send_command_with_args(device_name, "request_job_history",
                                                       priority=Priority.USER, num=count)
 
-            # wait for records to arrive; poll until count reached or 10s with no new record
+            # Done once `count` records, or every record the mower announced
+            # (total_ack_num; it may send fewer than requested), has arrived.
+            # Without an announcement, fall back to 10s with no new record.
             prev_count = 0
             stale_polls = 0
             for _ in range(120):  # up to 60s total
-                await asyncio.sleep(0.5)
-                cur_count = len(work_reports)
-                if cur_count >= count:
+                try:
+                    await asyncio.wait_for(all_received.wait(), timeout=0.5)
                     break
+                except TimeoutError:
+                    pass
+                cur_count = len(work_reports)
                 if cur_count > prev_count:
                     stale_polls = 0
                     prev_count = cur_count
@@ -1077,11 +1111,14 @@ class MammotionCLI(Mammotion):
                 end = datetime.fromtimestamp(report['end_work_time'])
                 print(f"  Ended:       {end.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            # duration
-            if report['work_time_used'] > 0:
-                hours = report['work_time_used'] // 3600
-                minutes = (report['work_time_used'] % 3600) // 60
-                print(f"  Duration:    {hours}h {minutes}m")
+            # time on the job: elapsed, cutting, and the rest (mid-job recharging and pauses)
+            elapsed, mowing, other = report_times(report)
+            if elapsed > 0:
+                print(f"  Elapsed:     {format_duration(elapsed)}")
+            if mowing > 0:
+                print(f"  Mowing:      {format_duration(mowing)}")
+            if elapsed > 0:
+                print(f"  Charging:    {format_duration(other)} (incl. any pauses)")
 
             # area
             if report['work_area'] > 0:
