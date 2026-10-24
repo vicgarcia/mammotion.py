@@ -652,6 +652,22 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reports[0]["start_work_time"], 1_760_000_000)
         self.assertEqual(self.cli.exit_code, 0)
 
+    async def test_report_labels_follow_upstream_app_enums(self):
+        # work_type is how the job was launched (2 = PLAN), not a border/grid mow order
+        self.assertEqual(app.WORK_TYPE_NAMES[2], "task / schedule")
+        self.assertEqual(app.WORK_RESULT_NAMES[3], "ended by user")
+        self.assertEqual(app.WORK_RESULT_NAMES[5], "completed")
+        self.cli.get_reports = AsyncMock(return_value=[{
+            "interrupt_flag": False, "start_work_time": 1_760_000_000, "end_work_time": 1_760_016_000,
+            "work_time_used": 16_000, "work_area": 660.0, "work_progress": 41, "height_of_knife": 65,
+            "work_type": 2, "work_result": 3}])
+        await self.cli.cmd_reports(NS(device=DEVICE, count=1, content_only=True, today_only=False,
+                                      verbose=False, json=False))
+        output = self.output.getvalue()
+        self.assertIn("Job Type:    task / schedule", output)
+        self.assertIn("Result:      ended by user", output)
+        self.assertNotIn("Border", output)
+
     async def test_rotated_tokens_callback_preserves_other_cache_blocks_on_failed_restore(self):
         previous = {
             "mammotion_data": {"token": "old"},

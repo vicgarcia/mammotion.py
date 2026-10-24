@@ -99,6 +99,8 @@ Resume uses `resume_execute_task` (action=3), not `start_job` (action=1). Schedu
 
 Selected `sys_status` values: READY=11, WORKING=13, RETURNING=14, CHARGING=15, PAUSE=19, MANUAL_MOWING=20. These are telemetry, not safety certification.
 
+Report labels come from upstream `pymammotion.http.model.work_report` (`WorkReportType`, `WorkReportResult`), which mirror the app's report screen. `work_type` is how the job was launched — SINGLE=1, PLAN=2 (a saved task or schedule), DROPMOW=3, RESUME=4 — **not** a border/grid mow order; an earlier hand-written table mislabeled 2 as "Border First". `work_result`: UNKNOWN=0, WORKING=1, PAUSED=2, USER_ENDED=3, INTERRUPTED=4, COMPLETED=5. Never hand-maintain these tables; map from the upstream enums.
+
 ## Safety contract
 
 The CLI cannot guarantee safety. Cloud pause/cancel/return are ordinary remote requests, never an emergency stop; return may move the mower. Network delay, account contention and confirmation failure can make outcomes uncertain. Use the **physical STOP button** in an emergency. Do not blindly retry an unconfirmed start or resume: inspect fresh state and the physical mower first.

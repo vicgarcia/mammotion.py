@@ -49,6 +49,7 @@ from pymammotion.client import MammotionClient
 from pymammotion.utility.device_type import DeviceType
 from pymammotion.data.model.device_config import OperationSettings, build_route_information
 from pymammotion.data.model.hash_list import AreaHashNameList, Plan
+from pymammotion.http.model.work_report import WorkReportResult, WorkReportType
 from pymammotion.messaging.command_queue import Priority
 from pymammotion.transport.base import ReLoginRequiredError, SessionExpiredError, TransportType
 
@@ -74,6 +75,23 @@ AUTH_CACHE_FILE = Path(os.environ.get('MAMMOTION_CACHE_DIR') or Path.home()) / '
 # start option values -> route settings
 PATTERNS = {'zigzag': 0, 'chessboard': 1, 'adaptive': 2, 'perimeter': 3}
 MOW_ORDERS = {'perimeter-first': 0, 'grid-first': 1}
+
+# report codes, using upstream's copies of the app's report-screen enums.
+# work_type is how the job was launched -- not a mow order or pattern.
+WORK_TYPE_NAMES = {
+    WorkReportType.SINGLE: "single job",
+    WorkReportType.PLAN: "task / schedule",
+    WorkReportType.DROPMOW: "drop mow",
+    WorkReportType.RESUME: "resumed job",
+}
+WORK_RESULT_NAMES = {
+    WorkReportResult.UNKNOWN: "unknown",
+    WorkReportResult.WORKING: "in progress",
+    WorkReportResult.PAUSED: "paused",
+    WorkReportResult.USER_ENDED: "ended by user",
+    WorkReportResult.INTERRUPTED: "interrupted",
+    WorkReportResult.COMPLETED: "completed",
+}
 
 
 class MammotionWorkMode(Enum):
@@ -1047,24 +1065,6 @@ class MammotionCLI(Mammotion):
             print("\nNo mowing reports available")
             return
 
-        # work type and result name maps
-        work_type_names = {
-            0: "Unknown",
-            1: "Mowing",
-            2: "Border First",
-            3: "Border Only",
-            4: "Task Mode",
-            8: "Manual Mode",
-        }
-        result_names = {
-            0: "In Progress",
-            1: "Failed",
-            2: "Canceled",
-            3: "Stopped",
-            4: "Paused",
-            5: "Completed",
-        }
-
         for idx, report in enumerate(work_reports, 1):
             print(f"\n  [{idx}/{len(work_reports)}] Mowing Report:")
 
@@ -1097,17 +1097,17 @@ class MammotionCLI(Mammotion):
             if report['work_progress'] > 0:
                 print(f"  Progress:    {report['work_progress']}%")
 
-            # work type
+            # how the job was launched (not a mow order or pattern)
             wt = report['work_type']
             if wt > 0:
-                print(f"  Work Type:   {work_type_names.get(wt, f'Type {wt}')}")
+                print(f"  Job Type:    {WORK_TYPE_NAMES.get(wt, f'unknown ({wt})')}")
 
             # result status
             if report['interrupt_flag']:
-                print("  Result:      Interrupted")
+                print("  Result:      interrupted")
             else:
                 wr = report['work_result']
-                print(f"  Result:      {result_names.get(wr, f'Unknown ({wr})')}")
+                print(f"  Result:      {WORK_RESULT_NAMES.get(wr, f'unknown ({wr})')}")
 
             # verbose debug output
             if args.verbose:
